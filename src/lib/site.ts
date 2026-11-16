@@ -6,7 +6,10 @@
 export const site = {
   name: process.env.NEXT_PUBLIC_BRAND_NAME ?? "AgroJC",
   tagline: process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? "Precios, calculadoras, gestión y marketplace para el campo",
-  url: (process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000").replace(/\/$/, ""),
+  url: (
+    process.env.NEXT_PUBLIC_SITE_URL ??
+    (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "http://localhost:3000")
+  ).replace(/\/$/, ""),
   primaryColor: process.env.NEXT_PUBLIC_BRAND_COLOR ?? null,
   partnerSlug: process.env.NEXT_PUBLIC_PARTNER_SLUG ?? null,
   supportEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "hola@agrojc.com",

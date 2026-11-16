@@ -29,6 +29,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="es" className={inter.variable}>
       <body className="min-h-dvh">
+        {/* White-label: partners override the primary color per deployment. */}
+        {site.primaryColor && /^#[0-9a-f]{3,8}$/i.test(site.primaryColor) ? (
+          <style>{`:root{--primary:${site.primaryColor};--ring:${site.primaryColor}}`}</style>
+        ) : null}
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={jsonLd({
