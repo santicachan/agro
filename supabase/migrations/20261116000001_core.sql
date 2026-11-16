@@ -89,7 +89,7 @@ create table public.subscriptions (
   plan_id text not null references public.plans(id),
   status text not null default 'active' check (status in ('trialing','active','past_due','canceled')),
   provider text,                               -- 'mercadopago' | 'stripe'
-  provider_ref text,
+  provider_ref text unique,
   current_period_end timestamptz,
   created_at timestamptz not null default now()
 );
