@@ -191,9 +191,18 @@ create table public.applications (
   org_id uuid not null references public.organizations(id) on delete cascade,
   payment_document_id uuid not null references public.documents(id) on delete cascade,
   invoice_document_id uuid not null references public.documents(id) on delete cascade,
-  amount numeric(16,2) not null,
+  amount numeric(16,2) not null,               -- in the invoice currency
   fx_rate numeric(16,6) not null default 1     -- FX at payment, used for diferencia de cambio
 );
+
+-- Pending balance per invoice/debit note, in the document currency.
+create or replace view public.open_items with (security_invoker = true) as
+select d.id, d.org_id, d.party_id, d.type, d.letter, d.point_of_sale, d.number, d.issue_date, d.due_date,
+       d.currency, d.fx_rate, d.total, d.vat,
+       d.total - coalesce((select sum(a.amount) from public.applications a where a.invoice_document_id = d.id), 0) as pending
+from public.documents d
+where d.status in ('issued','authorized')
+  and d.type in ('factura_venta','nota_debito_venta','factura_compra','nota_debito_compra');
 
 -- ───────────────────────────────────────────────────────────── Cheques
 create table public.cheques (
@@ -239,14 +248,14 @@ create table public.grain_swaps (
 create or replace view public.account_movements with (security_invoker = true) as
 select
   d.org_id, d.party_id, d.id as document_id, d.type, d.letter, d.point_of_sale, d.number,
-  d.issue_date, d.due_date, d.currency, d.fx_rate,
+  d.issue_date, d.due_date, d.currency, d.fx_rate, d.total,
+  -- Amount in the organization's base currency (documents in USD use their fx_rate).
+  round(d.total * d.fx_rate *
   case
-    when d.type in ('factura_venta','nota_debito_venta') then d.total
-    when d.type in ('nota_credito_venta','recibo') then -d.total
-    when d.type in ('factura_compra','nota_debito_compra') then -d.total
-    when d.type in ('nota_credito_compra','orden_pago') then d.total
+    when d.type in ('factura_venta','nota_debito_venta','nota_credito_compra','orden_pago') then 1
+    when d.type in ('nota_credito_venta','recibo','factura_compra','nota_debito_compra') then -1
     else 0
-  end as amount
+  end, 2) as amount
 from public.documents d
 where d.status <> 'cancelled' and d.status <> 'draft';
 
