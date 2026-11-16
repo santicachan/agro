@@ -7,6 +7,7 @@ import { z } from "zod";
 import { requireOrg, getUser } from "@/lib/auth";
 import { friendlyDbError } from "@/lib/billing/plans";
 import { createClient, createPublicClient } from "@/lib/supabase/server";
+import { LISTINGS_BUCKET } from "@/lib/supabase/env";
 import { requiresVerification, slugify } from "./categories";
 
 export interface FormState {
@@ -92,7 +93,7 @@ export async function createListing(_: FormState, formData: FormData): Promise<F
     if (!file.type.startsWith("image/")) return { error: "Solo se permiten imágenes" };
     const ext = file.type.split("/")[1]?.replace("jpeg", "jpg") ?? "jpg";
     const path = `${org.id}/${randomUUID()}.${ext}`;
-    const { error } = await supabase.storage.from("listings").upload(path, file, { contentType: file.type });
+    const { error } = await supabase.storage.from(LISTINGS_BUCKET).upload(path, file, { contentType: file.type });
     if (error) return { error: `No pudimos subir una foto: ${error.message}` };
     images.push(path);
   }

@@ -373,7 +373,7 @@ create trigger documents_plan_limit before insert on public.documents for each r
 
 -- Sequential numbering per (org, type, letter, point of sale).
 create or replace function public.assign_document_number() returns trigger
-language plpgsql as $$
+language plpgsql set search_path = public as $$
 begin
   if new.number is null then
     perform pg_advisory_xact_lock(hashtext(new.org_id::text || new.type || coalesce(new.letter,'') || new.point_of_sale::text));
