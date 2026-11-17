@@ -159,3 +159,70 @@ export function swapTons(debtUsd: number, priceUsdT: number, adjustmentPct = 0):
   const price = priceUsdT * (1 + adjustmentPct / 100);
   return price > 0 ? Math.ceil((debtUsd / price) * 1000) / 1000 : Number.NaN;
 }
+
+// ─────────────────────────────────────────────── Diferencia de cambio por alícuota
+export interface VatBase {
+  rate: number;
+  base: number; // net amount at this VAT rate, in the invoice currency
+}
+
+export interface FxDifferenceLine {
+  rate: number;
+  net: number;
+  vat: number;
+}
+
+/**
+ * Exchange difference split by the invoice's VAT rates, so the debit/credit note
+ * carries valid ARCA alícuotas (a blended rate like 15,8% would be rejected).
+ * Amounts are in the base currency.
+ */
+export function exchangeDifferenceByRate(i: {
+  side: "venta" | "compra";
+  vatBases: VatBase[];
+  foreignTotal: number;
+  appliedForeign: number;
+  invoiceFx: number;
+  paymentFx: number;
+}) {
+  const fraction = i.foreignTotal > 0 ? Math.min(1, i.appliedForeign / i.foreignTotal) : 0;
+  const delta = i.paymentFx - i.invoiceFx;
+  const lines: FxDifferenceLine[] = i.vatBases
+    .map((v) => {
+      const net = round2(Math.abs(v.base * fraction * delta));
+      return { rate: v.rate, net, vat: round2((net * v.rate) / 100) };
+    })
+    .filter((l) => l.net > 0);
+  const net = round2(lines.reduce((s, l) => s + l.net, 0));
+  const vat = round2(lines.reduce((s, l) => s + l.vat, 0));
+  const up = delta > 0;
+  const type: DocType =
+    i.side === "venta" ? (up ? "nota_debito_venta" : "nota_credito_venta") : up ? "nota_debito_compra" : "nota_credito_compra";
+  return { type, lines, net, vat, total: round2(net + vat), isZero: lines.length === 0, fraction, delta };
+}
+
+// ─────────────────────────────────────────────── Concepts & payment status
+export type DocConcept = "diferencia_cambio" | "cheque_rechazado" | null;
+
+export const CONCEPT_LABEL: Record<Exclude<DocConcept, null>, string> = {
+  diferencia_cambio: "Diferencia de cambio",
+  cheque_rechazado: "Cheque rechazado",
+};
+
+/** Human label for a document, e.g. "Nota de débito · Diferencia de cambio". */
+export function documentLabel(type: DocType, concept?: string | null): string {
+  const base = DOC_TYPES[type].label;
+  return concept && concept in CONCEPT_LABEL ? `${base} · ${CONCEPT_LABEL[concept as keyof typeof CONCEPT_LABEL]}` : base;
+}
+
+/** Documents that create debt and can be cancelled (imputados). */
+export const DEBIT_TYPES: DocType[] = ["factura_venta", "nota_debito_venta", "factura_compra", "nota_debito_compra"];
+/** Documents that cancel debt. */
+export const CREDIT_TYPES: DocType[] = ["recibo", "orden_pago", "nota_credito_venta", "nota_credito_compra"];
+
+export function paymentStatus(type: DocType, total: number, pending: number | null | undefined): "pagado" | "parcial" | "pendiente" | null {
+  if (!DEBIT_TYPES.includes(type) || pending == null) return null;
+  if (pending <= 0.005) return "pagado";
+  if (pending < total - 0.005) return "parcial";
+  return "pendiente";
+}
