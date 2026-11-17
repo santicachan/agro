@@ -4,7 +4,7 @@ const nextConfig: NextConfig = {
   // pdfkit reads its font metrics (.afm) from node_modules at runtime; keep it unbundled.
   serverExternalPackages: ["pdfkit", "exceljs"],
   outputFileTracingIncludes: {
-    "/app/libros/descargar": ["./node_modules/pdfkit/js/data/**/*"],
+    "/app/libros/descargar": ["./node_modules/pdfkit/js/data/**/*", "./node_modules/pdfkit/js/standard-fonts/**/*"],
   },
   experimental: {
     // Marketplace photos go through a server action. Vercel caps request bodies
