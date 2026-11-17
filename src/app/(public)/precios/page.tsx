@@ -5,6 +5,7 @@ import { PageHeader } from "@/components/ui/misc";
 import { PriceChart } from "@/components/prices/price-chart";
 import { PriceTable, Change } from "@/components/prices/price-table";
 import { FxStrip, SourceErrors } from "@/components/prices/fx-strip";
+import { PriceFreshness } from "@/components/prices/price-freshness";
 import { getPriceBoard } from "@/lib/prices";
 import { buildMetadata, breadcrumbLd, jsonLd } from "@/lib/seo";
 import { formatNumber } from "@/lib/format";
@@ -27,8 +28,9 @@ export default async function PreciosPage() {
   return (
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={jsonLd(breadcrumbLd([{ name: "Inicio", path: "/" }, { name: "Precios", path: "/precios" }]))} />
-      <PageHeader title="Precios de granos hoy" description="Pizarra de Rosario, futuros de Chicago e indicadores de Brasil, actualizados cada 15 minutos." />
+      <PageHeader title="Precios de granos hoy" description="Pizarra de Rosario, futuros de Chicago e indicadores de Brasil." />
       <div className="space-y-6">
+        <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} />
         <FxStrip fx={board.fx} />
         <SourceErrors errors={board.errors} />
 
@@ -90,8 +92,11 @@ export default async function PreciosPage() {
           ))}
         </div>
         <p className="text-xs text-muted-foreground">
-          Precios informativos de fuentes públicas. La pizarra de Rosario es precio contado, puesto sobre camión en zona Rosario. Actualizado:{" "}
-          {new Date(board.fetchedAt).toLocaleString("es-AR", { timeZone: "America/Argentina/Buenos_Aires" })}.
+          Precios informativos. La pizarra de Rosario (Cámara Arbitral de Cereales, vía{" "}
+          <a href="https://granos.ar" target="_blank" rel="noopener" className="underline">
+            granos.ar
+          </a>
+          ) es precio contado, puesto sobre camión en zona Rosario. Chicago: CME/CBOT. Brasil: CEPEA/ESALQ.
         </p>
       </div>
     </>

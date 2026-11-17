@@ -44,8 +44,14 @@ export interface PricePoint {
 export interface PriceBoard {
   quotes: PriceQuote[];
   fx: FxRate[];
+  /** USD/t series (CBOT, snapshots). */
   history: Record<string, PricePoint[]>;
+  /** ARS/t series for Rosario (granos.ar). */
+  historyArs: Record<string, PricePoint[]>;
   fetchedAt: string;
+  /** When the Rosario prices were last refreshed at the source (granos.ar), else fetchedAt. */
+  updatedAt: string;
+  refreshMinutes: number;
   /** Sources that failed during this fetch (shown to the user, never hidden). */
   errors: { source: string; message: string }[];
 }

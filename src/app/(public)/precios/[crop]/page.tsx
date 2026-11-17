@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/ui/misc";
 import { PriceChart } from "@/components/prices/price-chart";
 import { PriceTable } from "@/components/prices/price-table";
 import { FxStrip, SourceErrors } from "@/components/prices/fx-strip";
+import { PriceFreshness } from "@/components/prices/price-freshness";
 import { getPriceBoard, quotesForCrop } from "@/lib/prices";
 import { buildMetadata, breadcrumbLd, faqLd, jsonLd } from "@/lib/seo";
 import { formatNumber } from "@/lib/format";
@@ -76,6 +77,7 @@ export default async function CropPricePage({ params }: { params: Promise<{ crop
       />
       <PageHeader title={`Precio de ${name.toLowerCase()} hoy`} description={`${name} en Rosario, Chicago y Brasil — en pesos, dólares, toneladas y quintales.`} />
       <div className="space-y-6">
+        <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} />
         {rosario ? (
           <Card className="border-primary/40 bg-secondary/40">
             <CardContent className="grid gap-4 pt-5 sm:grid-cols-3">
@@ -95,15 +97,28 @@ export default async function CropPricePage({ params }: { params: Promise<{ crop
             {quotes.length ? <PriceTable quotes={quotes} fx={board.fx} showCrop={false} /> : <p className="text-muted-foreground">No hay cotizaciones disponibles en este momento.</p>}
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Evolución — USD/t</CardTitle>
-            <CardDescription>{board.history[`cme:${crop}`] ? "Futuros CBOT 1ª posición" : "Historial guardado por AgroJC"}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <PriceChart data={history} label={name} />
-          </CardContent>
-        </Card>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {board.historyArs[`rosario:${crop}`]?.length ? (
+            <Card>
+              <CardHeader>
+                <CardTitle>Pizarra Rosario — $/t</CardTitle>
+                <CardDescription>Últimas ruedas · fuente granos.ar</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <PriceChart data={board.historyArs[`rosario:${crop}`]} label={`${name} Rosario`} unit="$/t" />
+              </CardContent>
+            </Card>
+          ) : null}
+          <Card>
+            <CardHeader>
+              <CardTitle>Evolución — USD/t</CardTitle>
+              <CardDescription>{board.history[`cme:${crop}`] ? "Futuros CBOT 1ª posición" : "Historial guardado por AgroJC"}</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <PriceChart data={history} label={name} />
+            </CardContent>
+          </Card>
+        </div>
 
         <div className="flex flex-wrap gap-3">
           <Button asChild variant="secondary">

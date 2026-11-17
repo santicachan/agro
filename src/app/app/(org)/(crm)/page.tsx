@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/misc";
 import { Change } from "@/components/prices/price-table";
+import { PriceFreshness } from "@/components/prices/price-freshness";
 import { requireCrm } from "@/lib/auth";
 import { usagePct } from "@/lib/billing/plans";
 import { chequesInPortfolio, partyBalances, usage } from "@/lib/crm/queries";
@@ -70,6 +71,7 @@ export default async function DashboardPage() {
                 );
               })}
             </ul>
+            <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} className="mt-3" />
             <Button asChild variant="link" className="px-0">
               <Link href="/precios">Ver todos los mercados</Link>
             </Button>

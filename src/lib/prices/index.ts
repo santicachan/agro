@@ -4,25 +4,32 @@ import { fetchBcr } from "./sources/bcr";
 import { fetchBrasil } from "./sources/brasil";
 import { fetchCme } from "./sources/cme";
 import { fetchFx } from "./sources/fx";
+import { PRICE_REFRESH_SECONDS, fetchGranosAr } from "./sources/granosar";
 import type { PriceBoard, PricePoint, PriceQuote } from "./types";
 
 export * from "./types";
 
 /**
- * Fetches all live sources in parallel. A failing source never breaks the page:
- * its error is reported in `errors` and the rest still render. Rosario history
- * comes from our own daily snapshots (see /api/cron/prices).
+ * Fetches all live sources in parallel (each cached 15 minutes). A failing source
+ * never breaks the page: its error is reported in `errors` and the rest render.
+ * Rosario comes from the granos.ar API; if it is down we fall back to scraping
+ * the BCR board, and then to our last stored snapshot.
  */
 export async function getPriceBoard(): Promise<PriceBoard> {
   const errors: PriceBoard["errors"] = [];
-  const [fx, bcr, cme] = await Promise.all([
-    fetchFx(),
-    fetchBcr().catch((e: Error) => {
-      errors.push({ source: "BCR Rosario", message: e.message });
-      return null;
-    }),
-    fetchCme(),
-  ]);
+  const rosario = async () => {
+    try {
+      return await fetchGranosAr();
+    } catch (e) {
+      errors.push({ source: "granos.ar", message: (e as Error).message });
+      const bcr = await fetchBcr().catch((err: Error) => {
+        errors.push({ source: "BCR Rosario", message: err.message });
+        return null;
+      });
+      return bcr ? { quotes: bcr.quotes, history: {}, generatedAt: null as string | null } : null;
+    }
+  };
+  const [fx, ros, cme] = await Promise.all([fetchFx(), rosario(), fetchCme()]);
   fx.errors.forEach((m) => errors.push({ source: "Tipo de cambio", message: m }));
   cme.errors.forEach((m) => errors.push({ source: "CME Chicago", message: m }));
 
@@ -30,7 +37,7 @@ export async function getPriceBoard(): Promise<PriceBoard> {
   const brasil = await fetchBrasil(usdBrl);
   brasil.errors.forEach((m) => errors.push({ source: "Brasil CEPEA", message: m }));
 
-  const quotes: PriceQuote[] = [...(bcr?.quotes ?? []), ...cme.items.map((i) => i.quote), ...brasil.items];
+  const quotes: PriceQuote[] = [...(ros?.quotes ?? []), ...cme.items.map((i) => i.quote), ...brasil.items];
   const history: Record<string, PricePoint[]> = Object.fromEntries(cme.items.map((i) => [i.quote.key, i.history]));
 
   const snapshots = await getSnapshots();
@@ -42,7 +49,17 @@ export async function getPriceBoard(): Promise<PriceBoard> {
     if (!quotes.some((q) => q.key === key)) quotes.push(fallback);
   }
 
-  return { quotes, fx: fx.items, history, fetchedAt: new Date().toISOString(), errors };
+  const fetchedAt = new Date().toISOString();
+  return {
+    quotes,
+    fx: fx.items,
+    history,
+    historyArs: ros?.history ?? {},
+    fetchedAt,
+    updatedAt: ros?.generatedAt ?? fetchedAt,
+    refreshMinutes: PRICE_REFRESH_SECONDS / 60,
+    errors,
+  };
 }
 
 async function getSnapshots(): Promise<{ history: Record<string, PricePoint[]>; latest: Map<string, PriceQuote> }> {

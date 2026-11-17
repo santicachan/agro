@@ -57,3 +57,30 @@ describe("Yahoo/CME parser", () => {
     expect(history).toHaveLength(3);
   });
 });
+
+describe("granos.ar API parser", () => {
+  const pizarra = JSON.parse(fixture("granosar-pizarra.json"));
+  const historico = JSON.parse(fixture("granosar-historico.json"));
+  it("reads Rosario prices in ARS and USD with daily change", async () => {
+    const { parsePizarra } = await import("./sources/granosar");
+    const r = parsePizarra(pizarra);
+    expect(r.date).toBe("2026-11-13");
+    expect(r.fxBuy).toBe(1542);
+    expect(r.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    const soja = r.quotes.find((q) => q.crop === "soja")!;
+    expect(soja).toMatchObject({ key: "rosario:soja", price: 545000, usdPerTon: 353.44, changePct: 0.93, direction: "up", currency: "ARS", sourceUrl: "https://granos.ar" });
+    expect(soja.source).toContain("granos.ar");
+    expect(r.quotes.map((q) => q.crop).sort()).toEqual(["girasol", "maiz", "soja", "sorgo", "trigo"]);
+  });
+  it("reads ARS history per crop, oldest first", async () => {
+    const { parseHistorico } = await import("./sources/granosar");
+    const h = parseHistorico(historico);
+    expect(h["rosario:soja"]).toHaveLength(10);
+    expect(h["rosario:soja"][0].date < h["rosario:soja"][9].date).toBe(true);
+    expect(h["rosario:soja"].at(-1)).toEqual({ date: "2026-11-13", value: 545000 });
+  });
+  it("fails loudly on an error envelope so the BCR fallback kicks in", async () => {
+    const { parsePizarra } = await import("./sources/granosar");
+    expect(() => parsePizarra({ meta: { fuente: "granos.ar", generado_en: "x" }, error: "Servicio no disponible" })).toThrow("Servicio no disponible");
+  });
+});
