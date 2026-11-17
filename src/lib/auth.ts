@@ -62,9 +62,9 @@ export const requireOrg = cache(async (): Promise<OrgContext> => {
   };
 });
 
-/** Like requireOrg, but for CRM features: free plans are sent to the upsell screen. */
+/** Like requireOrg, but for CRM pages and actions: free plans are redirected to the upsell before anything renders. */
 export async function requireCrm(): Promise<OrgContext> {
   const ctx = await requireOrg();
-  if (!ctx.plan.crm) redirect("/app");
+  if (!ctx.plan.crm) redirect("/app/mejorar");
   return ctx;
 }

@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/form";
 import { Badge, EmptyState, PageHeader } from "@/components/ui/misc";
 import { SwapForm } from "@/components/crm/swap-form";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { registerSwapDelivery } from "@/lib/crm/actions";
 import { listParties } from "@/lib/crm/queries";
 import { getPriceBoard } from "@/lib/prices";
@@ -13,7 +13,7 @@ import { CROPS, isCrop, type Crop } from "@/lib/units";
 export const metadata = { title: "Canjes de granos" };
 
 export default async function SwapsPage() {
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const [parties, board, { data }] = await Promise.all([
     listParties(ctx, "customer"),
     getPriceBoard(),

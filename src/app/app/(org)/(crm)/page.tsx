@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/misc";
 import { Change } from "@/components/prices/price-table";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { usagePct } from "@/lib/billing/plans";
 import { chequesInPortfolio, partyBalances, usage } from "@/lib/crm/queries";
 import { getPriceBoard } from "@/lib/prices";
@@ -21,7 +21,7 @@ const QUICK = [
 ];
 
 export default async function DashboardPage() {
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const [balances, cheques, use, board] = await Promise.all([partyBalances(ctx), chequesInPortfolio(ctx), usage(ctx), getPriceBoard()]);
   let receivable = 0;
   let payable = 0;

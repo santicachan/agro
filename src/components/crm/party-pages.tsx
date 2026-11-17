@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/form";
 import { Badge, EmptyState, PageHeader, Table, Td, Th } from "@/components/ui/misc";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { DOC_TYPES, TAX_CONDITIONS, formatDocNumber, runningBalance } from "@/lib/crm/documents";
 import { accountStatement, getParty, listParties, partyBalances, type Kind } from "@/lib/crm/queries";
 import { formatDate, formatMoney } from "@/lib/format";
@@ -18,7 +18,7 @@ const COPY = {
 } as const;
 
 export async function PartyListPage({ kind, q }: { kind: Kind; q?: string }) {
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const c = COPY[kind];
   const [parties, balances] = await Promise.all([listParties(ctx, kind, q), partyBalances(ctx)]);
   const sign = kind === "customer" ? 1 : -1;
@@ -75,7 +75,7 @@ export async function PartyListPage({ kind, q }: { kind: Kind; q?: string }) {
 }
 
 export async function PartyNewPage({ kind }: { kind: Kind }) {
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   return (
     <>
       <PageHeader title={`Nuevo ${COPY[kind].singular}`} />
@@ -89,7 +89,7 @@ export async function PartyNewPage({ kind }: { kind: Kind }) {
 }
 
 export async function PartyDetailPage({ kind, id, edit }: { kind: Kind; id: string; edit?: boolean }) {
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const party = await getParty(ctx, id);
   if (!party) notFound();
   const c = COPY[kind];
