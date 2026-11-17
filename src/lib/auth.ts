@@ -61,3 +61,10 @@ export const requireOrg = cache(async (): Promise<OrgContext> => {
     region: getRegion(m.organizations.region),
   };
 });
+
+/** Like requireOrg, but for CRM features: free plans are sent to the upsell screen. */
+export async function requireCrm(): Promise<OrgContext> {
+  const ctx = await requireOrg();
+  if (!ctx.plan.crm) redirect("/app");
+  return ctx;
+}

@@ -5,6 +5,10 @@
  * another application without touching its tables.
  *
  *   node scripts/build-schema-sql.mjs [schema] [bucket] > agrojc.sql
+ *   node scripts/build-schema-sql.mjs agrojc agrojc-listings --from=20261116000006 > upgrade.sql
+ *
+ * --from=<prefix> only includes migrations >= that prefix and skips the seed,
+ * to upgrade an existing installation.
  *
  * Then set NEXT_PUBLIC_SUPABASE_SCHEMA=<schema> and
  * NEXT_PUBLIC_SUPABASE_LISTINGS_BUCKET=<bucket>, and add the schema to
@@ -14,13 +18,19 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const schema = process.argv[2] ?? "agrojc";
-const bucket = process.argv[3] ?? `${schema}-listings`;
+const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const from = process.argv.find((a) => a.startsWith("--from="))?.slice(7);
+const schema = args[0] ?? "agrojc";
+const bucket = args[1] ?? `${schema}-listings`;
 if (!/^[a-z_][a-z0-9_]*$/.test(schema)) throw new Error("invalid schema name");
 if (!/^[a-z0-9-]+$/.test(bucket)) throw new Error("invalid bucket name");
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "supabase");
-const files = [...readdirSync(join(root, "migrations")).sort().map((f) => join(root, "migrations", f)), join(root, "seed.sql")];
+const migrations = readdirSync(join(root, "migrations"))
+  .sort()
+  .filter((f) => !from || f >= from)
+  .map((f) => join(root, "migrations", f));
+const files = from ? migrations : [...migrations, join(root, "seed.sql")];
 
 const rewrite = (sql) =>
   sql
