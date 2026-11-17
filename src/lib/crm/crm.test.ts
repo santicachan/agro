@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { computeTotals, exchangeDifference, formatDocNumber, invoiceLetter, ledgerSign, runningBalance, swapTons } from "./documents";
 import { buildFECAERequest } from "./arca";
-import { commission, friendlyDbError, usagePct } from "@/lib/billing/plans";
+import { PLANS, commission, friendlyDbError, getPlan, usagePct } from "@/lib/billing/plans";
 
 describe("documents", () => {
   it("picks invoice letter", () => {
@@ -107,6 +107,10 @@ describe("plans", () => {
     expect(usagePct(10, 20)).toBe(50);
     expect(usagePct(10, null)).toBeNull();
     expect(commission(1000, "pro")).toEqual({ pct: 4, amount: 40 });
+  });
+  it("CRM is only for paid plans", () => {
+    expect(PLANS.filter((p) => !p.crm).map((p) => p.id)).toEqual(["free"]);
+    expect(getPlan("free").maxListings).toBe(1);
   });
   it("friendly errors", () => {
     expect(friendlyDbError("PLAN_LIMIT: tu plan Gratis permite hasta 25 clientes")).toContain("Pasate a un plan superior");

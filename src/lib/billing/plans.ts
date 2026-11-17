@@ -10,6 +10,8 @@ export interface Plan {
   maxUsers: number | null;
   maxListings: number | null;
   commissionPct: number;
+  /** CRM / facturación (clientes, comprobantes, cheques, canjes). Paid plans only. */
+  crm: boolean;
   highlight?: boolean;
   features: string[];
 }
@@ -22,9 +24,10 @@ export const PLANS: Plan[] = [
     maxCustomers: 25,
     maxInvoicesMonth: 20,
     maxUsers: 1,
-    maxListings: 3,
+    maxListings: 1,
     commissionPct: 8,
-    features: ["Precios y calculadoras", "Hasta 25 clientes/proveedores", "20 comprobantes por mes", "3 publicaciones en marketplace"],
+    crm: false,
+    features: ["Precios en tiempo real", "Todas las calculadoras", "Marketplace: comprar y 1 publicación", "Sin CRM ni facturación"],
   },
   {
     id: "basic",
@@ -35,7 +38,8 @@ export const PLANS: Plan[] = [
     maxUsers: 3,
     maxListings: 15,
     commissionPct: 6,
-    features: ["Todo lo de Gratis", "250 clientes/proveedores", "200 comprobantes por mes", "Cheques en cartera y canjes", "3 usuarios"],
+    crm: true,
+    features: ["CRM y facturación", "250 clientes/proveedores", "200 comprobantes por mes", "Cheques en cartera y canjes", "3 usuarios"],
   },
   {
     id: "pro",
@@ -46,6 +50,7 @@ export const PLANS: Plan[] = [
     maxUsers: 10,
     maxListings: 60,
     commissionPct: 4,
+    crm: true,
     highlight: true,
     features: ["Todo lo de Basic", "Clientes ilimitados", "Factura electrónica ARCA", "Diferencia de cambio automática", "Alertas de precios", "Comisión marketplace 4%"],
   },
@@ -58,6 +63,7 @@ export const PLANS: Plan[] = [
     maxUsers: null,
     maxListings: null,
     commissionPct: 3,
+    crm: true,
     features: ["Todo lo de Pro", "Comprobantes y usuarios ilimitados", "Marca blanca para partners", "API y soporte dedicado", "Comisión marketplace 3%"],
   },
 ];

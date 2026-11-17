@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { friendlyDbError } from "@/lib/billing/plans";
 import { getEInvoicingProvider } from "./arca";
 import { DOC_TYPES, computeTotals, exchangeDifference, invoiceLetter, type TaxCondition } from "./documents";
@@ -32,7 +32,7 @@ const partySchema = z.object({
 });
 
 export async function saveParty(_: ActionState, formData: FormData): Promise<ActionState> {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const parsed = partySchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const { id, ...data } = parsed.data;
@@ -73,7 +73,7 @@ const documentSchema = z.object({
 export type DocumentPayload = z.input<typeof documentSchema>;
 
 export async function createDocument(payload: DocumentPayload): Promise<ActionState & { id?: string }> {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const parsed = documentSchema.safeParse(payload);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const d = parsed.data;
@@ -125,7 +125,7 @@ export async function createDocument(payload: DocumentPayload): Promise<ActionSt
 
 /** Remito → Factura: copies lines and links the invoice to the delivery note. */
 export async function invoiceFromRemito(remitoId: string) {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const { data: remito } = await supabase
     .from("documents")
     .select("*, document_lines(*)")
@@ -157,7 +157,7 @@ export async function invoiceFromRemito(remitoId: string) {
 }
 
 export async function authorizeWithArca(documentId: string) {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const { data: doc } = await supabase.from("documents").select("*, parties(tax_id), document_lines(*)").eq("id", documentId).eq("org_id", org.id).single();
   if (!doc) redirect("/app/comprobantes");
   try {
@@ -229,7 +229,7 @@ const paymentSchema = z.object({
 export type PaymentPayload = z.input<typeof paymentSchema>;
 
 export async function createPayment(payload: PaymentPayload): Promise<ActionState & { id?: string }> {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const parsed = paymentSchema.safeParse(payload);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const p = parsed.data;
@@ -311,7 +311,7 @@ const CHEQUE_TRANSITIONS: Record<string, string[]> = {
 };
 
 export async function updateChequeStatus(formData: FormData) {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const id = String(formData.get("id"));
   const status = String(formData.get("status"));
   const { data: cheque } = await supabase.from("cheques").select("status").eq("id", id).eq("org_id", org.id).single();
@@ -333,7 +333,7 @@ const swapSchema = z.object({
 });
 
 export async function createSwap(_: ActionState, formData: FormData): Promise<ActionState> {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const parsed = swapSchema.safeParse(Object.fromEntries(formData));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const s = parsed.data;
@@ -353,7 +353,7 @@ export async function createSwap(_: ActionState, formData: FormData): Promise<Ac
 }
 
 export async function registerSwapDelivery(formData: FormData) {
-  const { supabase, org } = await requireOrg();
+  const { supabase, org } = await requireCrm();
   const id = String(formData.get("id"));
   const tons = Number(formData.get("tons"));
   if (!(tons > 0)) return;

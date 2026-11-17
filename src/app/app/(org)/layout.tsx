@@ -23,7 +23,7 @@ export default async function OrgLayout({ children }: { children: React.ReactNod
           </span>
           {site.name}
         </Link>
-        <SideNav />
+        <SideNav crm={plan.crm} />
         <div className="mt-auto space-y-2 text-sm">
           <p className="font-semibold">{org.name}</p>
           <p className="truncate text-muted-foreground">{user.email}</p>
@@ -46,7 +46,7 @@ export default async function OrgLayout({ children }: { children: React.ReactNod
         </header>
         <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 pb-24 lg:pb-8">{children}</main>
       </div>
-      <BottomNav />
+      <BottomNav crm={plan.crm} />
     </div>
   );
 }
