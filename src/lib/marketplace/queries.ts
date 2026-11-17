@@ -1,5 +1,6 @@
 import "server-only";
 import { createPublicClient } from "@/lib/supabase/server";
+import { LISTINGS_BUCKET } from "@/lib/supabase/env";
 import { childrenOf } from "./categories";
 
 export interface Listing {
@@ -60,5 +61,5 @@ export function isVerified(l: Listing) {
 
 export function imageUrl(path: string) {
   if (path.startsWith("http")) return path;
-  return `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/listings/${path}`;
+  return `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/${LISTINGS_BUCKET}/${path}`;
 }
