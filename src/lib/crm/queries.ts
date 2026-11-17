@@ -1,6 +1,6 @@
 import "server-only";
 import type { OrgContext } from "@/lib/auth";
-import type { DocType, Letter, TaxCondition } from "./documents";
+import { CREDIT_TYPES, type DocType, type Letter, type TaxCondition } from "./documents";
 
 export interface PartyRow {
   id: string;
@@ -97,7 +97,14 @@ export async function accountStatement(ctx: OrgContext, partyId: string, range: 
     .order("created_at", { ascending: true });
   if (range.to) q = q.lte("issue_date", range.to);
   const { data } = await q;
-  const all = (data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total), fx_rate: Number(r.fx_rate) })) as StatementRow[];
+  // Same day: documents that create debt (and remitos) before the ones that cancel it, so the
+  // running balance never shows an artificial intermediate value (e.g. a receipt and the
+  // exchange-difference note it generated share the same timestamp).
+  const rank = (t: DocType) => (CREDIT_TYPES.includes(t) ? 2 : t === "remito" ? 1 : 0);
+  const all = ((data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total), fx_rate: Number(r.fx_rate) })) as StatementRow[])
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) => a.r.issue_date.localeCompare(b.r.issue_date) || rank(a.r.type) - rank(b.r.type) || a.i - b.i)
+    .map(({ r }) => r);
   if (!range.from) return { opening: 0, rows: all };
   const opening = Math.round(all.filter((r) => r.issue_date < range.from!).reduce((s, r) => s + r.amount, 0) * 100) / 100;
   return { opening, rows: all.filter((r) => r.issue_date >= range.from!) };
