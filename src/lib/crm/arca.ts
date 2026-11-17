@@ -7,7 +7,7 @@
  * certificate and private key, which must be stored in a secret manager
  * (Supabase Vault), never in the database row.
  */
-import type { DocType, Letter } from "./documents";
+import { isValidCuit, type DocType, type Letter } from "./documents";
 
 /** CbteTipo codes (tabla de comprobantes ARCA). */
 const CBTE_TIPO: Partial<Record<DocType, Partial<Record<Letter, number>>>> = {
@@ -119,4 +119,44 @@ export class UnconfiguredArcaProvider implements EInvoicingProvider {
 
 export function getEInvoicingProvider(): EInvoicingProvider {
   return new UnconfiguredArcaProvider();
+}
+
+// ─────────────────────────────────────────────── Pre-flight validation
+export interface ArcaCheckInput {
+  type: DocType;
+  letter: Letter | null;
+  pointOfSale: number;
+  issueDate: string;
+  issuerCuit: string | null;
+  receiverCuit: string | null;
+  receiverCondition: string | null;
+  vatRates: number[];
+  total: number;
+  configuredPointOfSale: number | null;
+  today?: string;
+}
+
+/** Everything ARCA would reject, checked before calling the web service. Messages are for non-accountants. */
+export function arcaPreflight(i: ArcaCheckInput): string[] {
+  const errors: string[] = [];
+  if (!CBTE_TIPO[i.type]) errors.push("Este tipo de comprobante no se autoriza en ARCA (solo facturas y notas de crédito/débito de venta).");
+  if (!i.letter) errors.push("El comprobante no tiene letra (A, B o C).");
+  if (!isValidCuit(i.issuerCuit)) errors.push("Falta el CUIT de tu empresa o no es válido. Cargalo en Configuración.");
+  if (!i.configuredPointOfSale) errors.push("Falta configurar el punto de venta de factura electrónica en Configuración.");
+  else if (i.pointOfSale !== i.configuredPointOfSale) errors.push(`El comprobante usa el punto de venta ${i.pointOfSale}, pero el habilitado en ARCA es ${i.configuredPointOfSale}.`);
+  if (i.letter === "A" && !isValidCuit(i.receiverCuit)) errors.push("Para una factura A el cliente necesita un CUIT válido.");
+  if (i.letter !== "C") for (const r of i.vatRates) if (IVA_ID[String(r)] === undefined) errors.push(`La alícuota de IVA ${r}% no existe en ARCA.`);
+  if (!(i.total > 0)) errors.push("El total tiene que ser mayor a cero.");
+  const today = new Date(`${i.today ?? new Date().toISOString().slice(0, 10)}T12:00:00Z`);
+  const date = new Date(`${i.issueDate}T12:00:00Z`);
+  const days = Math.round((date.getTime() - today.getTime()) / 86_400_000);
+  if (days < -5 || days > 5) errors.push("ARCA solo acepta comprobantes de productos con fecha hasta 5 días antes o después de hoy.");
+  return errors;
+}
+
+export const ARCA_ENVIRONMENTS = { homologacion: "Homologación (pruebas)", produccion: "Producción" } as const;
+export type ArcaEnvironment = keyof typeof ARCA_ENVIRONMENTS;
+
+export function isArcaConfigured() {
+  return Boolean(process.env.ARCA_CERT && process.env.ARCA_KEY);
 }

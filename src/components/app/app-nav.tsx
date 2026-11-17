@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Banknote, FileText, House, Lock, Repeat, Sparkles, Store, Truck, Users } from "lucide-react";
+import { Banknote, BookOpen, FileText, House, Lock, Repeat, Settings, Sparkles, Store, Truck, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const APP_NAV = [
@@ -12,7 +12,9 @@ export const APP_NAV = [
   { href: "/app/cheques", label: "Cheques", icon: Banknote },
   { href: "/app/proveedores", label: "Proveedores", icon: Truck },
   { href: "/app/canjes", label: "Canjes", icon: Repeat },
+  { href: "/app/libros", label: "Libros contables", icon: BookOpen },
   { href: "/app/publicaciones", label: "Marketplace", icon: Store },
+  { href: "/app/configuracion", label: "Configuración", icon: Settings },
 ];
 
 /** Free plans: CRM is locked (shows the upsell); marketplace and plan stay available. */
