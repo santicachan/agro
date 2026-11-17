@@ -360,3 +360,56 @@ export function buildBook(id: BookId, docs: BookDocument[], opts: { orgName: str
 export function isBookId(v: string): v is BookId {
   return BOOKS.some((b) => b.id === v);
 }
+
+// ─────────────────────────────────────────────── Cuenta corriente (export)
+export interface StatementInputRow {
+  type: DocType;
+  letter: string | null;
+  point_of_sale: number;
+  number: number;
+  issue_date: string;
+  due_date: string | null;
+  currency: string;
+  fx_rate: number;
+  total: number;
+  amount: number; // signed, base currency, already oriented (+ = owes us for customers)
+  concept: string | null;
+  source: string | null;
+}
+
+export function buildStatementBook(rows: StatementInputRow[], opts: { orgName: string; partyName: string; partyTaxId: string | null; currency: string; period: string; opening: number; kind: "customer" | "supplier" }): Book {
+  let balance = opts.opening;
+  const out: Row[] = [];
+  if (opts.opening) out.push({ fecha: "", comprobante: "Saldo anterior", referencia: "", debe: null, haber: null, saldo: r2(opts.opening) });
+  for (const m of rows) {
+    balance = r2(balance + m.amount);
+    out.push({
+      fecha: m.issue_date,
+      comprobante: `${DOC_TYPES[m.type].label}${m.concept && m.concept in CONCEPT_LABEL ? ` (${CONCEPT_LABEL[m.concept as keyof typeof CONCEPT_LABEL]})` : ""} ${m.letter ?? ""} ${formatDocNumber(m.point_of_sale, m.number)}`.replace(/\s+/g, " "),
+      referencia: m.source ?? (m.amount === 0 ? "Sin importe en cuenta" : ""),
+      moneda: m.currency === opts.currency ? "" : `${m.currency} ${m.total.toLocaleString("es-AR", { minimumFractionDigits: 2 })} @ ${m.fx_rate}`,
+      debe: m.amount > 0 ? m.amount : null,
+      haber: m.amount < 0 ? -m.amount : null,
+      saldo: m.amount === 0 ? null : balance,
+    });
+  }
+  const debe = r2(rows.reduce((s, m) => s + Math.max(0, m.amount), 0));
+  const haber = r2(rows.reduce((s, m) => s + Math.max(0, -m.amount), 0));
+  return {
+    id: "detalle",
+    title: `Cuenta corriente — ${opts.partyName}`,
+    subtitle: `${opts.orgName} · ${opts.kind === "customer" ? "Cliente" : "Proveedor"}${opts.partyTaxId ? ` · CUIT ${opts.partyTaxId}` : ""} · ${opts.period}`,
+    columns: [
+      { key: "fecha", label: "Fecha", type: "date", width: 11 },
+      { key: "comprobante", label: "Comprobante", type: "text", width: 40 },
+      { key: "referencia", label: "Referencia", type: "text", width: 22 },
+      { key: "moneda", label: "Moneda original", type: "text", width: 22 },
+      { key: "debe", label: "Debe", type: "money" },
+      { key: "haber", label: "Haber", type: "money" },
+      { key: "saldo", label: "Saldo", type: "money" },
+    ],
+    rows: out,
+    totals: { fecha: "", comprobante: "TOTALES Y SALDO FINAL", debe, haber, saldo: balance },
+    notes: [`Importes en ${opts.currency}. Saldo positivo: ${opts.kind === "customer" ? "el cliente nos debe" : "le debemos al proveedor"}.`],
+  };
+}

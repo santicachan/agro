@@ -5,8 +5,9 @@ import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireCrm } from "@/lib/auth";
 import { friendlyDbError } from "@/lib/billing/plans";
-import { getEInvoicingProvider } from "./arca";
-import { DOC_TYPES, computeTotals, exchangeDifference, invoiceLetter, type TaxCondition } from "./documents";
+import { arcaPreflight, buildFECAERequest, getEInvoicingProvider, isArcaConfigured, type ArcaDocument } from "./arca";
+import { computeTotals, formatCuit, isValidCuit } from "./documents";
+import { buildDocumentRpc, buildPaymentRpc } from "./payloads";
 
 export interface ActionState {
   error?: string;
@@ -63,7 +64,7 @@ const documentSchema = z.object({
   dueDate: optional,
   currency: z.enum(["ARS", "USD", "BRL"]),
   fxRate: z.coerce.number().positive(),
-  pointOfSale: z.coerce.number().int().min(1).max(99999).default(1),
+  pointOfSale: z.coerce.number().int().min(1).max(99999).optional(),
   otherTaxes: z.coerce.number().min(0).default(0),
   notes: optional,
   sourceDocumentId: optional,
@@ -71,6 +72,8 @@ const documentSchema = z.object({
 });
 
 export type DocumentPayload = z.input<typeof documentSchema>;
+
+const NOTE_TYPES = ["nota_credito_venta", "nota_debito_venta", "nota_credito_compra", "nota_debito_compra"];
 
 export async function createDocument(payload: DocumentPayload): Promise<ActionState & { id?: string }> {
   const { supabase, org } = await requireCrm();
@@ -81,118 +84,155 @@ export async function createDocument(payload: DocumentPayload): Promise<ActionSt
   const { data: party } = await supabase.from("parties").select("id, tax_condition").eq("id", d.partyId).eq("org_id", org.id).single();
   if (!party) return { error: "Cliente/proveedor inexistente" };
 
-  const totals = computeTotals(d.lines, d.otherTaxes);
-  const fiscal = DOC_TYPES[d.type].fiscal;
-  const letter = fiscal ? invoiceLetter((org.tax_condition ?? "RI") as TaxCondition, (party.tax_condition ?? "CF") as TaxCondition) : null;
-  // Remitos carry quantities; their amounts are informative and do not hit the cuenta corriente.
-  const { data: id, error } = await supabase.rpc("create_document", {
-    p_doc: {
-      org_id: org.id,
-      party_id: d.partyId,
+  let applyToSource: number | null = null;
+  if (d.sourceDocumentId && NOTE_TYPES.includes(d.type)) {
+    const { data: src } = await supabase.from("documents").select("currency, party_id").eq("id", d.sourceDocumentId).eq("org_id", org.id).single();
+    if (!src || src.party_id !== d.partyId) return { error: "El comprobante asociado no corresponde a este cliente/proveedor" };
+    if (src.currency !== d.currency) return { error: `La nota tiene que estar en la misma moneda que el comprobante asociado (${src.currency})` };
+    // A credit note cancels (part of) the associated invoice.
+    if (d.type.startsWith("nota_credito")) {
+      const { data: bal } = await supabase.from("document_balances").select("pending").eq("id", d.sourceDocumentId).single();
+      const total = computeTotals(d.lines, d.otherTaxes).total;
+      applyToSource = Math.min(total, Number(bal?.pending ?? 0));
+    }
+  }
+
+  const { data: id, error } = await supabase.rpc(
+    "create_document",
+    buildDocumentRpc(org, party, {
       type: d.type,
-      letter,
-      point_of_sale: d.pointOfSale,
-      issue_date: d.issueDate,
-      due_date: d.dueDate,
+      issueDate: d.issueDate,
+      dueDate: d.dueDate,
       currency: d.currency,
-      fx_rate: d.currency === org.base_currency ? 1 : d.fxRate,
-      net: totals.net,
-      vat: totals.vat,
-      other_taxes: d.otherTaxes,
-      total: totals.total,
-      status: "issued",
-      source_document_id: d.sourceDocumentId,
+      fxRate: d.fxRate,
+      pointOfSale: d.pointOfSale,
+      otherTaxes: d.otherTaxes,
       notes: d.notes,
-    },
-    p_lines: d.lines.map((l) => {
-      const net = Math.round(l.quantity * l.unitPrice * 100) / 100;
-      return {
-        product_id: l.productId,
-        description: l.description,
-        quantity: l.quantity,
-        unit: l.unit,
-        unit_price: l.unitPrice,
-        vat_rate: l.vatRate,
-        net,
-        vat: Math.round(net * l.vatRate) / 100,
-      };
+      sourceDocumentId: d.sourceDocumentId,
+      applyToSource,
+      lines: d.lines,
     }),
-  });
+  );
   if (error) return { error: friendlyDbError(error.message) };
   revalidatePath("/app/comprobantes");
   return { ok: true, id: id as string };
 }
 
-/** Remito → Factura: copies lines and links the invoice to the delivery note. */
-export async function invoiceFromRemito(remitoId: string) {
+type LineRow = { description: string; quantity: number; unit: string; unit_price: number; vat_rate: number; product_id: string | null };
+const rowsToLines = (rows: LineRow[]) =>
+  rows.map((l) => ({ description: l.description, quantity: Number(l.quantity), unit: l.unit, unitPrice: Number(l.unit_price), vatRate: Number(l.vat_rate), productId: l.product_id ?? undefined }));
+
+async function copyDocument(sourceId: string, from: "remito" | "factura_venta", to: "remito" | "factura_venta") {
   const { supabase, org } = await requireCrm();
-  const { data: remito } = await supabase
-    .from("documents")
-    .select("*, document_lines(*)")
-    .eq("id", remitoId)
-    .eq("org_id", org.id)
-    .eq("type", "remito")
-    .single();
-  if (!remito) redirect("/app/comprobantes?error=remito");
+  const { data: src } = await supabase.from("documents").select("*, document_lines(*)").eq("id", sourceId).eq("org_id", org.id).eq("type", from).single();
+  if (!src) redirect("/app/comprobantes");
   const res = await createDocument({
-    type: "factura_venta",
-    partyId: remito.party_id,
+    type: to,
+    partyId: src.party_id,
     issueDate: new Date().toISOString().slice(0, 10),
-    currency: remito.currency,
-    fxRate: Number(remito.fx_rate),
-    pointOfSale: remito.point_of_sale,
-    sourceDocumentId: remito.id,
-    notes: remito.notes ?? undefined,
-    lines: (remito.document_lines as { description: string; quantity: number; unit: string; unit_price: number; vat_rate: number; product_id: string | null }[]).map((l) => ({
-      description: l.description,
-      quantity: Number(l.quantity),
-      unit: l.unit,
-      unitPrice: Number(l.unit_price),
-      vatRate: Number(l.vat_rate),
-      productId: l.product_id ?? undefined,
-    })),
+    currency: src.currency,
+    fxRate: Number(src.fx_rate),
+    pointOfSale: src.point_of_sale,
+    sourceDocumentId: src.id,
+    notes: src.notes ?? undefined,
+    lines: rowsToLines(src.document_lines as LineRow[]),
   });
-  if (res.error || !res.id) redirect(`/app/comprobantes/${remitoId}?error=${encodeURIComponent(res.error ?? "error")}`);
+  if (res.error || !res.id) redirect(`/app/comprobantes/${sourceId}?error=${encodeURIComponent(res.error ?? "error")}`);
   redirect(`/app/comprobantes/${res.id}`);
 }
 
+/** Remito → Factura: copies lines and links the invoice to the delivery note. */
+export async function invoiceFromRemito(remitoId: string) {
+  return copyDocument(remitoId, "remito", "factura_venta");
+}
+
+/** Factura → Remito: delivery note for an invoice, linked to it. */
+export async function remitoFromInvoice(invoiceId: string) {
+  return copyDocument(invoiceId, "factura_venta", "remito");
+}
+
+/**
+ * "Autorizar en ARCA": validates everything ARCA would check, prepares and stores
+ * the FECAESolicitar request, and calls the e-invoicing provider. Until the
+ * certificate is loaded the document stays "listo para ARCA" and nothing is faked.
+ */
 export async function authorizeWithArca(documentId: string) {
   const { supabase, org } = await requireCrm();
-  const { data: doc } = await supabase.from("documents").select("*, parties(tax_id), document_lines(*)").eq("id", documentId).eq("org_id", org.id).single();
+  const { data: doc } = await supabase.from("documents").select("*, parties(tax_id, tax_condition), document_lines(*)").eq("id", documentId).eq("org_id", org.id).single();
   if (!doc) redirect("/app/comprobantes");
+  if (doc.status === "authorized") redirect(`/app/comprobantes/${documentId}`);
+  const back = (q: string) => redirect(`/app/comprobantes/${documentId}?${q}`);
+
+  const lines = (doc.document_lines as { quantity: number; unit_price: number; vat_rate: number; description: string }[]).map((l) => ({
+    description: l.description,
+    quantity: Number(l.quantity),
+    unitPrice: Number(l.unit_price),
+    vatRate: Number(l.vat_rate),
+  }));
+  const totals = computeTotals(lines, Number(doc.other_taxes));
+  const party = doc.parties as { tax_id: string | null; tax_condition: string | null } | null;
+  const configuredPos = Number((org.arca_config as { pointOfSale?: number } | null)?.pointOfSale) || null;
+  const errors = arcaPreflight({
+    type: doc.type,
+    letter: doc.letter,
+    pointOfSale: doc.point_of_sale,
+    issueDate: doc.issue_date,
+    issuerCuit: org.tax_id,
+    receiverCuit: party?.tax_id ?? null,
+    receiverCondition: party?.tax_condition ?? null,
+    vatRates: totals.vatByRate.map((v) => v.rate),
+    total: Number(doc.total),
+    configuredPointOfSale: configuredPos,
+  });
+  if (errors.length) back(`arca_errors=${encodeURIComponent(JSON.stringify(errors))}`);
+
+  // Associated invoice is mandatory for credit/debit notes.
+  let associated: ArcaDocument["associated"];
+  if (doc.source_document_id && doc.type !== "factura_venta") {
+    const { data: src } = await supabase.from("documents").select("type, letter, point_of_sale, number, issue_date").eq("id", doc.source_document_id).single();
+    if (src?.letter && ["factura_venta", "nota_debito_venta", "nota_credito_venta"].includes(src.type)) {
+      associated = [{ type: src.type, letter: src.letter, pointOfSale: src.point_of_sale, number: src.number, cuit: org.tax_id ?? "", date: src.issue_date }];
+    }
+  }
+  const arcaDoc: ArcaDocument = {
+    type: doc.type,
+    letter: doc.letter,
+    pointOfSale: doc.point_of_sale,
+    number: doc.number,
+    issueDate: doc.issue_date,
+    receiverTaxId: party?.tax_id ?? null,
+    currency: doc.currency,
+    fxRate: Number(doc.fx_rate),
+    net: Number(doc.net),
+    vat: Number(doc.vat),
+    otherTaxes: Number(doc.other_taxes),
+    total: Number(doc.total),
+    vatByRate: totals.vatByRate,
+    associated,
+  };
+  const request = buildFECAERequest(arcaDoc);
+  const preparedAt = new Date().toISOString();
+
+  if (!isArcaConfigured()) {
+    await supabase.from("documents").update({ arca_response: { status: "ready", preparedAt, request } }).eq("id", documentId);
+    revalidatePath(`/app/comprobantes/${documentId}`);
+    back("arca=listo");
+  }
+  // redirect() throws, so it must stay outside try/catch.
+  let outcome = "arca=ok";
   try {
-    const totals = computeTotals(
-      (doc.document_lines as { quantity: number; unit_price: number; vat_rate: number; description: string }[]).map((l) => ({
-        description: l.description,
-        quantity: Number(l.quantity),
-        unitPrice: Number(l.unit_price),
-        vatRate: Number(l.vat_rate),
-      })),
-    );
-    const result = await getEInvoicingProvider().authorize(
-      {
-        type: doc.type,
-        letter: doc.letter,
-        pointOfSale: doc.point_of_sale,
-        number: doc.number,
-        issueDate: doc.issue_date,
-        receiverTaxId: (doc.parties as { tax_id: string | null } | null)?.tax_id ?? null,
-        currency: doc.currency,
-        fxRate: Number(doc.fx_rate),
-        net: Number(doc.net),
-        vat: Number(doc.vat),
-        otherTaxes: Number(doc.other_taxes),
-        total: Number(doc.total),
-        vatByRate: totals.vatByRate,
-      },
-      org.tax_id ?? "",
-    );
-    await supabase.from("documents").update({ cae: result.cae, cae_due: result.caeDue, arca_response: result.raw, status: "authorized" }).eq("id", documentId);
+    const result = await getEInvoicingProvider().authorize(arcaDoc, org.tax_id ?? "");
+    const { error } = await supabase
+      .from("documents")
+      .update({ cae: result.cae, cae_due: result.caeDue, arca_response: { status: "authorized", preparedAt, request, response: result.raw }, status: "authorized" })
+      .eq("id", documentId);
+    if (error) outcome = `error=${encodeURIComponent(friendlyDbError(error.message))}`;
   } catch (e) {
-    redirect(`/app/comprobantes/${documentId}?error=${encodeURIComponent((e as Error).message)}`);
+    await supabase.from("documents").update({ arca_response: { status: "rejected", preparedAt, request, error: (e as Error).message } }).eq("id", documentId);
+    outcome = `error=${encodeURIComponent((e as Error).message)}`;
   }
   revalidatePath(`/app/comprobantes/${documentId}`);
-  redirect(`/app/comprobantes/${documentId}`);
+  back(outcome);
 }
 
 // ─────────────────────────────────────────────── Payments (recibos / órdenes de pago)
@@ -236,67 +276,27 @@ export async function createPayment(payload: PaymentPayload): Promise<ActionStat
   for (const it of p.items) {
     if ((it.method === "cheque" || it.method === "echeq") && !it.chequeId && !it.cheque) return { error: "Completá los datos del cheque" };
   }
-  const total = Math.round(p.items.reduce((s, i) => s + i.amount, 0) * 100) / 100;
+  const { data: party } = await supabase.from("parties").select("id, tax_condition").eq("id", p.partyId).eq("org_id", org.id).single();
+  if (!party) return { error: "Cliente/proveedor inexistente" };
 
-  // Load the invoices being cancelled to compute exchange differences.
   const ids = p.applications.map((a) => a.invoiceId);
   const { data: invoices } = ids.length
-    ? await supabase.from("documents").select("id, type, letter, point_of_sale, currency, fx_rate, total, vat, number").in("id", ids).eq("org_id", org.id)
+    ? await supabase.from("documents").select("id, type, letter, point_of_sale, number, currency, fx_rate, total, party_id, document_lines(vat_rate, net)").in("id", ids).eq("org_id", org.id)
     : { data: [] as never[] };
-  const { data: party } = await supabase.from("parties").select("tax_condition").eq("id", p.partyId).single();
+  if (p.applications.some((a) => !invoices?.some((i) => i.id === a.invoiceId && i.party_id === p.partyId))) return { error: "Comprobante a cancelar inexistente" };
 
-  if (p.applications.some((a) => !invoices?.some((i) => i.id === a.invoiceId))) return { error: "Comprobante a cancelar inexistente" };
-  const fxNotes: unknown[] = [];
-  const applications = p.applications.map((a) => {
-    const inv = invoices!.find((i) => i.id === a.invoiceId)!;
-    const foreign = inv.currency !== org.base_currency;
-    if (foreign && p.autoFxNotes && inv.type === "factura_venta") {
-      const diff = exchangeDifference({
-        foreignTotal: Number(inv.total),
-        foreignVat: Number(inv.vat),
-        invoiceFx: Number(inv.fx_rate),
-        paymentFx: p.fxRate,
-        appliedFraction: Math.min(1, a.amount / Number(inv.total)),
-      });
-      if (!diff.isZero) {
-        const letter = invoiceLetter((org.tax_condition ?? "RI") as TaxCondition, (party?.tax_condition ?? "CF") as TaxCondition);
-        fxNotes.push({
-          doc: {
-            type: diff.type,
-            letter,
-            point_of_sale: inv.point_of_sale,
-            issue_date: p.issueDate,
-            currency: org.base_currency,
-            fx_rate: 1,
-            net: diff.net,
-            vat: diff.vat,
-            total: diff.total,
-            status: "issued",
-            source_document_id: inv.id,
-            notes: `Diferencia de cambio s/ comprobante ${inv.point_of_sale}-${inv.number} (TC ${inv.fx_rate} → ${p.fxRate})`,
-          },
-          lines: [{ description: "Diferencia de cambio", quantity: 1, unit: "u", unit_price: diff.net, vat_rate: diff.vatRate, net: diff.net, vat: diff.vat }],
-        });
-      }
-    }
-    return { invoice_document_id: a.invoiceId, amount: a.amount, fx_rate: foreign ? p.fxRate : 1 };
-  });
-
-  const { data: id, error } = await supabase.rpc("create_document", {
-    p_doc: { org_id: org.id, party_id: p.partyId, type: p.type, issue_date: p.issueDate, currency: org.base_currency, fx_rate: 1, total, status: "issued", notes: p.notes },
-    p_lines: [],
-    p_payments: p.items.map((i) => ({
-      method: i.method,
-      amount: i.amount,
-      reference: i.reference,
-      cheque_id: i.chequeId,
-      cheque: i.cheque
-        ? { bank: i.cheque.bank, number: i.cheque.number, drawer_name: i.cheque.drawerName, drawer_tax_id: i.cheque.drawerTaxId, payment_date: i.cheque.paymentDate }
-        : undefined,
-    })),
-    p_applications: applications,
-    p_fx_notes: fxNotes,
-  });
+  let args;
+  try {
+    args = buildPaymentRpc(
+      org,
+      party,
+      p,
+      (invoices ?? []).map((i) => ({ ...i, fx_rate: Number(i.fx_rate), total: Number(i.total), lines: (i.document_lines ?? []).map((l: { vat_rate: number; net: number }) => ({ vat_rate: Number(l.vat_rate), net: Number(l.net) })) })),
+    );
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+  const { data: id, error } = await supabase.rpc("create_document", args);
   if (error) return { error: friendlyDbError(error.message) };
   revalidatePath("/app/comprobantes");
   revalidatePath("/app/cheques");
@@ -304,10 +304,11 @@ export async function createPayment(payload: PaymentPayload): Promise<ActionStat
 }
 
 // ─────────────────────────────────────────────── Cheques
-const CHEQUE_TRANSITIONS: Record<string, string[]> = {
-  en_cartera: ["depositado", "rechazado"],
-  depositado: ["acreditado", "rechazado"],
-  emitido: ["debitado", "rechazado"],
+const CHEQUE_TRANSITIONS: Record<string, { to: string; dateField: string }[]> = {
+  en_cartera: [{ to: "depositado", dateField: "deposited_at" }],
+  depositado: [{ to: "acreditado", dateField: "credited_at" }],
+  emitido: [{ to: "debitado", dateField: "credited_at" }],
+  endosado: [{ to: "acreditado", dateField: "credited_at" }],
 };
 
 export async function updateChequeStatus(formData: FormData) {
@@ -315,10 +316,52 @@ export async function updateChequeStatus(formData: FormData) {
   const id = String(formData.get("id"));
   const status = String(formData.get("status"));
   const { data: cheque } = await supabase.from("cheques").select("status").eq("id", id).eq("org_id", org.id).single();
-  if (cheque && CHEQUE_TRANSITIONS[cheque.status]?.includes(status)) {
-    await supabase.from("cheques").update({ status }).eq("id", id);
-  }
+  const t = cheque ? CHEQUE_TRANSITIONS[cheque.status]?.find((x) => x.to === status) : null;
+  if (t) await supabase.from("cheques").update({ status, [t.dateField]: new Date().toISOString().slice(0, 10) }).eq("id", id);
   revalidatePath("/app/cheques");
+}
+
+/** Rejected cheque: books the debit note(s) automatically (see reject_cheque in SQL). */
+export async function rejectCheque(formData: FormData) {
+  const { supabase, org } = await requireCrm();
+  const id = String(formData.get("id"));
+  const fee = Math.max(0, Number(formData.get("fee")) || 0);
+  const reason = String(formData.get("reason") ?? "").trim() || null;
+  const { data: cheque } = await supabase.from("cheques").select("id").eq("id", id).eq("org_id", org.id).single();
+  if (!cheque) redirect("/app/cheques");
+  const { data: docId, error } = await supabase.rpc("reject_cheque", { p_cheque: id, p_fee: fee, p_fee_vat_rate: 21, p_reason: reason });
+  revalidatePath("/app/cheques");
+  if (error) redirect(`/app/cheques?ver=todos&error=${encodeURIComponent(friendlyDbError(error.message))}`);
+  redirect(docId ? `/app/comprobantes/${docId}?cheque=rechazado` : "/app/cheques?ver=todos");
+}
+
+// ─────────────────────────────────────────────── Configuración (empresa + ARCA)
+const settingsSchema = z.object({
+  name: trimmed.min(2, "Nombre de la empresa"),
+  tax_id: trimmed.refine((v) => !v || isValidCuit(v), "El CUIT no es válido"),
+  tax_condition: z.enum(["RI", "MONO", "EX"]),
+  pointOfSale: z.coerce.number().int().min(1, "Punto de venta entre 1 y 99999").max(99999),
+  environment: z.enum(["homologacion", "produccion"]),
+});
+
+export async function saveSettings(_: ActionState, formData: FormData): Promise<ActionState> {
+  const { supabase, org, role } = await requireCrm();
+  if (!["owner", "admin"].includes(role)) return { error: "Solo el dueño o un administrador puede cambiar la configuración." };
+  const parsed = settingsSchema.safeParse(Object.fromEntries(formData));
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message };
+  const s = parsed.data;
+  const { error } = await supabase
+    .from("organizations")
+    .update({
+      name: s.name,
+      tax_id: s.tax_id ? formatCuit(s.tax_id) : null,
+      tax_condition: s.tax_condition,
+      arca_config: { ...(org.arca_config ?? {}), pointOfSale: s.pointOfSale, environment: s.environment },
+    })
+    .eq("id", org.id);
+  if (error) return { error: friendlyDbError(error.message) };
+  revalidatePath("/app", "layout");
+  return { ok: true };
 }
 
 // ─────────────────────────────────────────────── Canje

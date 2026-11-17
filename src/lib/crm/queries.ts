@@ -36,6 +36,9 @@ export interface DocumentRow {
   cae_due: string | null;
   notes: string | null;
   source_document_id: string | null;
+  concept: string | null;
+  meta: Record<string, unknown> | null;
+  arca_response: { status?: string; preparedAt?: string; error?: string } | null;
   parties?: { name: string; tax_id: string | null; tax_condition: TaxCondition | null } | null;
 }
 
@@ -62,25 +65,42 @@ export async function getParty(ctx: OrgContext, id: string) {
   return data as PartyRow | null;
 }
 
-export async function accountStatement(ctx: OrgContext, partyId: string) {
-  const { data } = await ctx.supabase
+export interface StatementRow {
+  document_id: string;
+  type: DocType;
+  letter: Letter | null;
+  point_of_sale: number;
+  number: number;
+  issue_date: string;
+  due_date: string | null;
+  currency: string;
+  fx_rate: number;
+  total: number;
+  amount: number;
+  concept: string | null;
+  source_document_id: string | null;
+  status: string;
+  cae: string | null;
+}
+
+/**
+ * Cuenta corriente of a party, oldest first, in base currency. With `from`, the
+ * balance of earlier movements is returned as `opening` (saldo anterior).
+ */
+export async function accountStatement(ctx: OrgContext, partyId: string, range: { from?: string; to?: string } = {}) {
+  let q = ctx.supabase
     .from("account_movements")
-    .select("document_id, type, letter, point_of_sale, number, issue_date, due_date, currency, fx_rate, total, amount")
+    .select("document_id, type, letter, point_of_sale, number, issue_date, due_date, currency, fx_rate, total, amount, concept, source_document_id, status, cae, created_at")
     .eq("org_id", ctx.org.id)
     .eq("party_id", partyId)
     .order("issue_date", { ascending: true })
-    .order("number", { ascending: true });
-  return (data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total) })) as {
-    document_id: string;
-    type: DocType;
-    letter: Letter | null;
-    point_of_sale: number;
-    number: number;
-    issue_date: string;
-    currency: string;
-    total: number;
-    amount: number;
-  }[];
+    .order("created_at", { ascending: true });
+  if (range.to) q = q.lte("issue_date", range.to);
+  const { data } = await q;
+  const all = (data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total), fx_rate: Number(r.fx_rate) })) as StatementRow[];
+  if (!range.from) return { opening: 0, rows: all };
+  const opening = Math.round(all.filter((r) => r.issue_date < range.from!).reduce((s, r) => s + r.amount, 0) * 100) / 100;
+  return { opening, rows: all.filter((r) => r.issue_date >= range.from!) };
 }
 
 export async function openItems(ctx: OrgContext, partyId: string, side: "venta" | "compra") {
@@ -145,4 +165,30 @@ export async function usage(ctx: OrgContext) {
       .gte("issue_date", monthStart.toISOString().slice(0, 10)),
   ]);
   return { parties: parties ?? 0, invoices: invoices ?? 0 };
+}
+
+/** Pending amount per document (debt still open, or amount not yet applied). */
+export async function balancesFor(ctx: OrgContext, ids: string[]) {
+  const map = new Map<string, number>();
+  if (!ids.length) return map;
+  for (let i = 0; i < ids.length; i += 200) {
+    const { data } = await ctx.supabase.from("document_balances").select("id, pending").in("id", ids.slice(i, i + 200));
+    for (const r of data ?? []) map.set(r.id, Number(r.pending));
+  }
+  return map;
+}
+
+/** Invoices/debit notes of a party that a credit/debit note can be associated with. */
+export async function associableDocuments(ctx: OrgContext, partyId: string, side: "venta" | "compra") {
+  const types = side === "venta" ? ["factura_venta", "nota_debito_venta"] : ["factura_compra", "nota_debito_compra"];
+  const { data } = await ctx.supabase
+    .from("documents")
+    .select("id, type, letter, point_of_sale, number, issue_date, currency, fx_rate, total")
+    .eq("org_id", ctx.org.id)
+    .eq("party_id", partyId)
+    .in("type", types)
+    .in("status", ["issued", "authorized"])
+    .order("issue_date", { ascending: false })
+    .limit(100);
+  return (data ?? []) as { id: string; type: DocType; letter: Letter | null; point_of_sale: number; number: number; issue_date: string; currency: string; fx_rate: number; total: number }[];
 }

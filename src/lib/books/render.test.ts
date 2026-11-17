@@ -17,7 +17,7 @@ describe("renderers", () => {
   it("xlsx has one sheet per book with totals", async () => {
     const buf = await booksToXlsx(books, { orgName: "Agro Demo SA", app: "AgroJC" });
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buf);
+    await wb.xlsx.load(buf as unknown as ArrayBuffer);
     expect(wb.worksheets.map((w) => w.name)).toEqual(books.map((b) => b.title.slice(0, 31)));
     const ws = wb.getWorksheet("Libro IVA Ventas")!;
     expect(ws.getCell(4, 1).value).toBe("Fecha");

@@ -84,7 +84,7 @@ export function usagePct(used: number, limit: number | null): number | null {
 /** Turns DB trigger errors ("PLAN_LIMIT: ...") into a friendly message. */
 export function friendlyDbError(message: string | undefined | null): string {
   if (!message) return "Ocurrió un error. Intentá de nuevo.";
-  const m = message.match(/(PLAN_LIMIT|VERIFICATION_REQUIRED):\s*(.*)/);
+  const m = message.match(/(PLAN_LIMIT|VERIFICATION_REQUIRED|LOCKED):\s*(.*)/);
   if (m) return m[1] === "PLAN_LIMIT" ? `${m[2]}. Pasate a un plan superior para seguir.` : m[2];
   if (message.includes("duplicate key")) return "Ya existe un registro con esos datos.";
   return message;

@@ -226,3 +226,21 @@ export function paymentStatus(type: DocType, total: number, pending: number | nu
   if (pending < total - 0.005) return "parcial";
   return "pendiente";
 }
+
+// ─────────────────────────────────────────────── CUIT
+/** Validates an Argentine CUIT/CUIL (11 digits + mod-11 check digit). */
+export function isValidCuit(raw: string | null | undefined): boolean {
+  const d = (raw ?? "").replace(/\D/g, "");
+  if (d.length !== 11) return false;
+  const weights = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2];
+  const sum = weights.reduce((s, w, i) => s + w * Number(d[i]), 0);
+  let check = 11 - (sum % 11);
+  if (check === 11) check = 0;
+  if (check === 10) check = 9;
+  return check === Number(d[10]);
+}
+
+export function formatCuit(raw: string | null | undefined): string {
+  const d = (raw ?? "").replace(/\D/g, "");
+  return d.length === 11 ? `${d.slice(0, 2)}-${d.slice(2, 10)}-${d.slice(10)}` : (raw ?? "");
+}
