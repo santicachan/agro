@@ -23,7 +23,7 @@ export function SiteHeader() {
         </nav>
         <div className="flex items-center gap-2">
           <Button asChild size="sm" className="hidden sm:inline-flex">
-            <Link href="/app">Mi campo</Link>
+            <Link href="/app">Ingresar</Link>
           </Button>
           <MobileNav />
         </div>

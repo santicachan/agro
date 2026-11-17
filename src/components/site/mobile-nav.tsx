@@ -21,7 +21,7 @@ export function MobileNav() {
       {open ? (
         <nav className="absolute inset-x-0 top-16 border-b bg-background p-4 shadow-lg" aria-label="Móvil">
           <ul className="flex flex-col gap-1">
-            {[...publicNav, { href: "/app", label: "Mi campo" }].map((item) => (
+            {[...publicNav, { href: "/app", label: "Ingresar" }].map((item) => (
               <li key={item.href}>
                 <Link href={item.href} onClick={() => setOpen(false)} className="block rounded-lg px-4 py-3 text-lg font-medium hover:bg-muted">
                   {item.label}
