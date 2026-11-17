@@ -3,6 +3,7 @@ import { ArrowRight, Calculator, ChartLine, FileText, Store } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Change } from "@/components/prices/price-table";
+import { PriceFreshness } from "@/components/prices/price-freshness";
 import { getPriceBoard } from "@/lib/prices";
 import { CALCULATORS } from "@/lib/calculators/registry";
 import { formatNumber } from "@/lib/format";
@@ -54,6 +55,7 @@ export default async function HomePage() {
         <h2 id="hoy" className="mb-3 text-xl font-bold">
           Pizarra Rosario hoy
         </h2>
+        <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} className="mb-3" />
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           {crops.map((crop) => {
             const q = board.quotes.find((x) => x.key === `rosario:${crop}`);

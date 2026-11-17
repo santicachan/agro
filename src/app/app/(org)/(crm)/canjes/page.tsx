@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/form";
 import { Badge, EmptyState, PageHeader } from "@/components/ui/misc";
 import { SwapForm } from "@/components/crm/swap-form";
+import { PriceFreshness } from "@/components/prices/price-freshness";
 import { requireCrm } from "@/lib/auth";
 import { registerSwapDelivery } from "@/lib/crm/actions";
 import { listParties } from "@/lib/crm/queries";
@@ -34,6 +35,7 @@ export default async function SwapsPage() {
             <CardTitle>Nuevo canje</CardTitle>
           </CardHeader>
           <CardContent>
+            <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} compact className="mb-4" />
             <SwapForm parties={parties.map((p) => ({ id: p.id, name: p.name }))} referencePrices={referencePrices} />
           </CardContent>
         </Card>
