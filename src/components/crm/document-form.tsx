@@ -68,6 +68,9 @@ export function DocumentForm({
   const [fxRate, setFxRate] = useState(String(initialSource && initialSource.currency !== baseCurrency ? (usdRate ?? initialSource.fx_rate) : (usdRate ?? 1)));
   const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dueDate, setDueDate] = useState("");
+  const isPurchase = DOC_TYPES[type].side === "compra";
+  const [supplierPos, setSupplierPos] = useState("");
+  const [supplierNumber, setSupplierNumber] = useState("");
   const [notes, setNotes] = useState("");
   const [lines, setLines] = useState<Line[]>([emptyLine(defaultVat)]);
 
@@ -92,6 +95,8 @@ export function DocumentForm({
       fxRate: currency === baseCurrency ? 1 : Number(fxRate),
       notes: notes || undefined,
       sourceDocumentId: source || undefined,
+      ...(isPurchase && supplierPos ? { pointOfSale: Number(supplierPos) } : {}),
+      ...(isPurchase && supplierNumber ? { number: Number(supplierNumber) } : {}),
       lines: parsedLines,
     };
     start(async () => {
@@ -148,6 +153,16 @@ export function DocumentForm({
                 ))}
               </Select>
             </Field>
+          ) : null}
+          {isPurchase ? (
+            <>
+              <Field label="Punto de venta del proveedor" htmlFor="supplierPos" hint="Figura en el comprobante, ej. 00012">
+                <Input id="supplierPos" type="number" inputMode="numeric" min={1} max={99999} value={supplierPos} onChange={(e) => setSupplierPos(e.target.value)} />
+              </Field>
+              <Field label="Número de comprobante" htmlFor="supplierNumber" hint="Necesario para el Libro IVA Compras">
+                <Input id="supplierNumber" type="number" inputMode="numeric" min={1} value={supplierNumber} onChange={(e) => setSupplierNumber(e.target.value)} />
+              </Field>
+            </>
           ) : null}
           <Field label="Fecha" htmlFor="issueDate">
             <Input id="issueDate" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} />
@@ -223,7 +238,7 @@ export function DocumentForm({
             </p>
             <p className="text-2xl font-bold">{formatMoney(totals.total, currency)}</p>
           </div>
-          <Button size="lg" onClick={submit} disabled={pending || !party || (requiresSource && !source)}>
+          <Button size="lg" onClick={submit} disabled={pending || !party || (requiresSource && !source) || (type === "factura_compra" && (!supplierPos || !supplierNumber))}>
             {pending ? "Guardando…" : `Emitir ${DOC_TYPES[type].label.toLowerCase()}`}
           </Button>
         </CardContent>

@@ -109,8 +109,14 @@ describe("flujo comercial completo", () => {
       type: "recibo", issueDate: "2026-11-21", fxRate: 1, items: [{ method: "cheque", amount: 484000, cheque: { bank: "Galicia", number: "777", paymentDate: "2026-12-10" } }], applications: [],
     }, []));
     const fc = await rpc(buildDocumentRpc(ORG(), { id: supplier, tax_condition: "RI" }, {
-      type: "factura_compra", issueDate: "2026-11-10", currency: "ARS", fxRate: 1, lines: [{ description: "Fertilizante", quantity: 1, unitPrice: 400000, vatRate: 21 }],
+      type: "factura_compra", issueDate: "2026-11-10", currency: "ARS", fxRate: 1, pointOfSale: 12, number: 4581, lines: [{ description: "Fertilizante", quantity: 1, unitPrice: 400000, vatRate: 21 }],
     }));
+    expect((await q(`select point_of_sale, number from documents where id = $1`, [fc]))[0]).toMatchObject({ point_of_sale: 12, number: 4581 });
+    // Another supplier can have the same point of sale and number.
+    const other = (await q<{ id: string }>(`insert into parties(org_id,kind,name,tax_condition) values ($1,'supplier','Otro proveedor','RI') returning id`, [org]))[0].id;
+    await rpc(buildDocumentRpc(ORG(), { id: other, tax_condition: "RI" }, { type: "factura_compra", issueDate: "2026-11-10", currency: "ARS", fxRate: 1, pointOfSale: 12, number: 4581, lines: [{ description: "x", quantity: 1, unitPrice: 1, vatRate: 21 }] }));
+    // …but the same supplier cannot load the same invoice twice.
+    await expect(rpc(buildDocumentRpc(ORG(), { id: supplier, tax_condition: "RI" }, { type: "factura_compra", issueDate: "2026-11-10", currency: "ARS", fxRate: 1, pointOfSale: 12, number: 4581, lines: [{ description: "x", quantity: 1, unitPrice: 1, vatRate: 21 }] }))).rejects.toThrow(/duplicate key/);
     expect((await q(`select letter from documents where id = $1`, [fc]))[0].letter).toBe("A");
     expect(await balance(supplier)).toBe(-484000);
     const [ch] = await q<{ id: string }>(`select id from cheques where number = '777'`);

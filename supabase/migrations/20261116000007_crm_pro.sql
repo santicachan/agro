@@ -7,6 +7,14 @@ alter table public.documents add column if not exists meta jsonb not null defaul
 create index if not exists documents_source_idx on public.documents(source_document_id);
 create index if not exists documents_period_idx on public.documents(org_id, issue_date, type);
 
+-- Purchase documents carry the supplier's own point of sale and number, so two
+-- suppliers can share a number: uniqueness includes the party for purchases.
+alter table public.documents drop constraint if exists documents_org_id_type_letter_point_of_sale_number_key;
+create unique index if not exists documents_number_uniq on public.documents (
+  org_id, type, coalesce(letter, ''), point_of_sale, number,
+  coalesce(case when type in ('factura_compra','nota_credito_compra','nota_debito_compra') then party_id end, '00000000-0000-0000-0000-000000000000'::uuid)
+);
+
 -- create_document now stores concept + meta (same signature, so callers are unchanged).
 create or replace function public.create_document(
   p_doc jsonb,
@@ -26,10 +34,10 @@ declare
   v_note jsonb;
   v_note_id uuid;
 begin
-  insert into documents(org_id, party_id, type, letter, point_of_sale, issue_date, due_date, currency, fx_rate,
+  insert into documents(org_id, party_id, type, letter, point_of_sale, number, issue_date, due_date, currency, fx_rate,
                         net, vat, other_taxes, total, status, source_document_id, notes, created_by, concept, meta)
   values (v_org, (p_doc->>'party_id')::uuid, p_doc->>'type', nullif(p_doc->>'letter',''),
-          coalesce((p_doc->>'point_of_sale')::int, 1), coalesce((p_doc->>'issue_date')::date, current_date),
+          coalesce((p_doc->>'point_of_sale')::int, 1), nullif(p_doc->>'number','')::bigint, coalesce((p_doc->>'issue_date')::date, current_date),
           nullif(p_doc->>'due_date','')::date, coalesce(p_doc->>'currency','ARS'), coalesce((p_doc->>'fx_rate')::numeric, 1),
           coalesce((p_doc->>'net')::numeric, 0), coalesce((p_doc->>'vat')::numeric, 0), coalesce((p_doc->>'other_taxes')::numeric, 0),
           coalesce((p_doc->>'total')::numeric, 0), coalesce(p_doc->>'status','issued'),

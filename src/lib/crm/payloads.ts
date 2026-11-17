@@ -54,6 +54,8 @@ export interface DocumentInput {
   currency: string;
   fxRate: number;
   pointOfSale?: number;
+  /** Supplier's own number for purchase documents. Sales are numbered automatically. */
+  number?: number | null;
   otherTaxes?: number;
   notes?: string | null;
   sourceDocumentId?: string | null;
@@ -71,7 +73,8 @@ export function buildDocumentRpc(org: OrgInfo, party: PartyInfo, d: DocumentInpu
       party_id: party.id,
       type: d.type,
       letter: letterFor(d.type, org, party),
-      point_of_sale: d.pointOfSale ?? defaultPointOfSale(org),
+      point_of_sale: d.pointOfSale ?? (DOC_TYPES[d.type].side === "compra" ? 1 : defaultPointOfSale(org)),
+      number: DOC_TYPES[d.type].side === "compra" ? (d.number ?? null) : null,
       issue_date: d.issueDate,
       due_date: d.dueDate ?? null,
       currency: d.currency,
