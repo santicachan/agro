@@ -1,7 +1,7 @@
 import { DocumentForm } from "@/components/crm/document-form";
 import { PaymentForm } from "@/components/crm/payment-form";
 import { PageHeader } from "@/components/ui/misc";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { DOC_TYPES, type DocType } from "@/lib/crm/documents";
 import { chequesInPortfolio, listParties, openItems } from "@/lib/crm/queries";
 import { fetchFx } from "@/lib/prices/sources/fx";
@@ -11,7 +11,7 @@ export const metadata = { title: "Nuevo comprobante" };
 export default async function NewDocumentPage({ searchParams }: { searchParams: Promise<{ tipo?: string; party?: string }> }) {
   const sp = await searchParams;
   const type = (sp.tipo && sp.tipo in DOC_TYPES ? sp.tipo : "factura_venta") as DocType;
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const side = DOC_TYPES[type].side;
   const [parties, fx] = await Promise.all([listParties(ctx, side === "venta" ? "customer" : "supplier"), fetchFx()]);
   const pair = ctx.org.base_currency === "BRL" ? "USD/BRL" : "USD/ARS";

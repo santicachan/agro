@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, Badge, PageHeader, Table, Td, Th } from "@/components/ui/misc";
 import { PrintButton } from "@/components/crm/print-button";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { authorizeWithArca, invoiceFromRemito } from "@/lib/crm/actions";
 import { DOC_TYPES, TAX_CONDITIONS, formatDocNumber, type DocType } from "@/lib/crm/documents";
 import type { DocumentRow } from "@/lib/crm/queries";
@@ -14,7 +14,7 @@ export const metadata = { title: "Comprobante" };
 
 export default async function DocumentPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ error?: string }> }) {
   const [{ id }, { error }] = await Promise.all([params, searchParams]);
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const { data } = await ctx.supabase
     .from("documents")
     .select("*, parties(name, tax_id, tax_condition), document_lines(*), payment_items(*, cheques(bank, number, payment_date)), applications!applications_payment_document_id_fkey(amount, fx_rate, documents!applications_invoice_document_id_fkey(id, type, letter, point_of_sale, number, currency))")

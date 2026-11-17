@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Badge, EmptyState, PageHeader } from "@/components/ui/misc";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { DOC_TYPES, formatDocNumber, type DocType } from "@/lib/crm/documents";
 import { listDocuments } from "@/lib/crm/queries";
 import { formatDate, formatMoney } from "@/lib/format";
@@ -29,7 +29,7 @@ const FILTERS: { value?: DocType; label: string }[] = [
 
 export default async function DocumentsPage({ searchParams }: { searchParams: Promise<{ tipo?: string }> }) {
   const { tipo } = await searchParams;
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   const docs = await listDocuments(ctx, { type: tipo && tipo in DOC_TYPES ? tipo : undefined });
   return (
     <>

@@ -17,7 +17,7 @@ export const APP_NAV = [
 
 /** Free plans: CRM is locked (shows the upsell); marketplace and plan stay available. */
 export const FREE_NAV = [
-  { href: "/app", label: "CRM", icon: Lock },
+  { href: "/app/mejorar", label: "CRM", icon: Lock },
   { href: "/app/publicaciones", label: "Marketplace", icon: Store },
   { href: "/app/plan", label: "Mi plan", icon: Sparkles },
 ];

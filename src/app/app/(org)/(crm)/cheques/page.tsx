@@ -2,7 +2,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge, EmptyState, PageHeader } from "@/components/ui/misc";
-import { requireOrg } from "@/lib/auth";
+import { requireCrm } from "@/lib/auth";
 import { updateChequeStatus } from "@/lib/crm/actions";
 import { formatDate, formatMoney } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -30,7 +30,7 @@ const ACTIONS: Record<string, { status: string; label: string }[]> = {
 
 export default async function ChequesPage({ searchParams }: { searchParams: Promise<{ ver?: string }> }) {
   const { ver = "cartera" } = await searchParams;
-  const ctx = await requireOrg();
+  const ctx = await requireCrm();
   let q = ctx.supabase
     .from("cheques")
     .select("id, kind, electronic, bank, number, drawer_name, amount, payment_date, status, received:parties!cheques_received_from_fkey(name), delivered:parties!cheques_delivered_to_fkey(name)")
