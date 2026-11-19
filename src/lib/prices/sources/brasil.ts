@@ -46,7 +46,7 @@ export function parseCepeaIndicator(html: string, crop: Crop, titlePrefix: strin
 export async function fetchBrasil(usdBrl: number | null, fetchImpl: typeof fetch = fetch) {
   const results = await Promise.allSettled(
     PAGES.map(async (p) => {
-      const res = await fetchImpl(p.url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; AgroJC/1.0)" }, next: { revalidate: 900 } } as RequestInit);
+      const res = await fetchImpl(p.url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; CAMPAGROX/1.0)" }, next: { revalidate: 900 } } as RequestInit);
       if (!res.ok) throw new Error(`Brasil ${p.crop} HTTP ${res.status}`);
       return parseCepeaIndicator(await res.text(), p.crop, p.titlePrefix, p.label, p.url, usdBrl);
     }),

@@ -24,7 +24,7 @@ export async function startCheckout(planId: string) {
   let url: string;
   try {
     const sub = await createSubscription({
-      reason: `AgroJC ${plan.name}`,
+      reason: `CAMPAGROX ${plan.name}`,
       amount: await localAmount(plan.priceUsdMonth, org.base_currency),
       currency: org.base_currency,
       payerEmail: user.email ?? "",

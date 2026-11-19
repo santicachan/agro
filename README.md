@@ -1,6 +1,8 @@
-# AgroJC
+# CAMPAGROX
 
-Plataforma agro todo-en-uno: **precios de granos en tiempo real**, **calculadoras agronómicas**, **gestión comercial / facturación** (CRM-ERP liviano estilo Finnegans) y **marketplace** de agroquímicos, insumos y maquinaria. Pensada mobile-first para gente del campo y preparada para escalar de Argentina a Brasil y el resto de LatAm.
+> Todo tu negocio del agro en un solo lugar. (Ex AgroJC: el proyecto de Vercel, el dominio `agrojc.vercel.app` y el schema de Postgres `agrojc` conservan el nombre técnico anterior.)
+
+Plataforma agro todo-en-uno: **precios de granos en tiempo real**, **calculadoras agronómicas**, **gestión comercial / facturación** (CRM-ERP liviano estilo Finnegans, con cuentas corrientes Blanco / Gestión / Marmolada en pesos y dólares) y **marketplace** de agroquímicos, insumos y maquinaria. Pensada mobile-first para gente del campo y preparada para escalar de Argentina a Brasil y el resto de LatAm.
 
 **Stack:** Next.js 15 (App Router, RSC, Server Actions) · Tailwind v4 + componentes estilo shadcn/ui · Supabase (Auth, Postgres + RLS, Storage) · Vercel (ISR + Cron) · Vitest.
 

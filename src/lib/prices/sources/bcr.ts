@@ -55,7 +55,7 @@ export function parseBcrPizarra(html: string): { quotes: PriceQuote[]; fxBuy: nu
 
 export async function fetchBcr(fetchImpl: typeof fetch = fetch) {
   const res = await fetchImpl(BCR_URL, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; AgroJC/1.0)" },
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; CAMPAGROX/1.0)" },
     next: { revalidate: 900 },
   } as RequestInit);
   if (!res.ok) throw new Error(`BCR HTTP ${res.status}`);

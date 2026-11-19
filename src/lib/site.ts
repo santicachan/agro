@@ -4,15 +4,15 @@
  * keeps public pages fully static/ISR for SEO.
  */
 export const site = {
-  name: process.env.NEXT_PUBLIC_BRAND_NAME ?? "AgroJC",
-  tagline: process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? "Precios, calculadoras, gestión y marketplace para el campo",
+  name: process.env.NEXT_PUBLIC_BRAND_NAME ?? "CAMPAGROX",
+  tagline: process.env.NEXT_PUBLIC_BRAND_TAGLINE ?? "Todo tu negocio del agro en un solo lugar",
   url: (
     process.env.NEXT_PUBLIC_SITE_URL ??
     (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : "http://localhost:3000")
   ).replace(/\/$/, ""),
   primaryColor: process.env.NEXT_PUBLIC_BRAND_COLOR ?? null,
   partnerSlug: process.env.NEXT_PUBLIC_PARTNER_SLUG ?? null,
-  supportEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "hola@agrojc.com",
+  supportEmail: process.env.NEXT_PUBLIC_SUPPORT_EMAIL ?? "hola@campagrox.com",
   locale: "es_AR",
 };
 

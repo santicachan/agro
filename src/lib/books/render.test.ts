@@ -15,7 +15,7 @@ const books = BOOKS.map((b) => buildBook(b.id, docs, { orgName: "Agro Demo SA", 
 
 describe("renderers", () => {
   it("xlsx has one sheet per book with totals", async () => {
-    const buf = await booksToXlsx(books, { orgName: "Agro Demo SA", app: "AgroJC" });
+    const buf = await booksToXlsx(books, { orgName: "Agro Demo SA", app: "CAMPAGROX" });
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as unknown as ArrayBuffer);
     expect(wb.worksheets.map((w) => w.name)).toEqual(books.map((b) => b.title.slice(0, 31)));
@@ -25,7 +25,7 @@ describe("renderers", () => {
     if (process.env.BOOKS_OUT) (await import("node:fs")).writeFileSync(`${process.env.BOOKS_OUT}/libros.xlsx`, buf);
   });
   it("pdf renders multiple pages", async () => {
-    const buf = await booksToPdf(books, { orgName: "Agro Demo SA", app: "AgroJC" });
+    const buf = await booksToPdf(books, { orgName: "Agro Demo SA", app: "CAMPAGROX" });
     expect(buf.subarray(0, 4).toString()).toBe("%PDF");
     expect(buf.length).toBeGreaterThan(5000);
     if (process.env.BOOKS_OUT) (await import("node:fs")).writeFileSync(`${process.env.BOOKS_OUT}/libros.pdf`, buf);

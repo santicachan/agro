@@ -35,9 +35,9 @@ export default async function HomePage() {
         })}
       />
       <section className="py-6 sm:py-12">
-        <h1 className="max-w-3xl text-4xl font-extrabold tracking-tight sm:text-5xl">Todo tu campo en un solo lugar.</h1>
+        <h1 className="max-w-3xl text-4xl font-extrabold tracking-tight sm:text-5xl">Todo tu negocio del agro en un solo lugar.</h1>
         <p className="mt-4 max-w-2xl text-lg text-muted-foreground">
-          Precios de granos al día, calculadoras gratuitas, gestión comercial simple y un marketplace para comprar y vender insumos y maquinaria.
+          Gestión comercial con cuentas corrientes, cheques y canjes, precios de granos al día, calculadoras gratuitas y un marketplace para comprar y vender insumos y maquinaria.
         </p>
         <div className="mt-6 flex flex-wrap gap-3">
           <Button asChild size="lg">

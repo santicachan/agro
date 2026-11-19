@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Builds a single SQL file that installs AgroJC into a dedicated Postgres schema
+ * Builds a single SQL file that installs CAMPAGROX into a dedicated Postgres schema
  * (default "agrojc") instead of "public", so it can share a Supabase project with
  * another application without touching its tables.
  *

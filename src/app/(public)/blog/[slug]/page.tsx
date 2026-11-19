@@ -58,6 +58,21 @@ export default async function PostPage({ params }: { params: Promise<{ slug: str
                 ))}
               </ul>
             );
+          if ("sources" in b)
+            return (
+              <aside key={i} className="rounded-xl border bg-muted/40 p-4 text-sm">
+                <h2 className="font-semibold">Fuentes</h2>
+                <ul className="mt-2 list-disc space-y-1 pl-5">
+                  {b.sources.map((src) => (
+                    <li key={src.href + src.label}>
+                      <a href={src.href} target="_blank" rel="noopener noreferrer" className="text-primary underline-offset-2 hover:underline">
+                        {src.label}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </aside>
+            );
           return (
             <Button key={i} asChild size="lg">
               <Link href={b.cta.href}>{b.cta.label}</Link>

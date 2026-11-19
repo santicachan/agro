@@ -112,7 +112,7 @@ export default async function CropPricePage({ params }: { params: Promise<{ crop
           <Card>
             <CardHeader>
               <CardTitle>Evolución — USD/t</CardTitle>
-              <CardDescription>{board.history[`cme:${crop}`] ? "Futuros CBOT 1ª posición" : "Historial guardado por AgroJC"}</CardDescription>
+              <CardDescription>{board.history[`cme:${crop}`] ? "Futuros CBOT 1ª posición" : "Historial guardado por CAMPAGROX"}</CardDescription>
             </CardHeader>
             <CardContent>
               <PriceChart data={history} label={name} />

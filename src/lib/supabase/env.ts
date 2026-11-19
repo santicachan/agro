@@ -7,7 +7,7 @@ export function isSupabaseConfigured(): boolean {
 }
 
 /**
- * Postgres schema holding AgroJC tables. "public" for a dedicated project; set to
+ * Postgres schema holding CAMPAGROX tables. "public" for a dedicated project; set to
  * "agrojc" when sharing a Supabase project with another app (see scripts/build-schema-sql.mjs).
  */
 export const SUPABASE_SCHEMA = process.env.NEXT_PUBLIC_SUPABASE_SCHEMA || "public";
