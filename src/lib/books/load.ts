@@ -18,7 +18,10 @@ const normalize = (d: Raw): BookDocument => ({
   lines: (d.document_lines ?? []).map((l) => ({ vat_rate: Number(l.vat_rate), net: Number(l.net), vat: Number(l.vat) })),
 });
 
-/** Documents of the period plus the ones they reference (to print "asociado a"). */
+/**
+ * Documents of the period plus the ones they reference (to print "asociado a").
+ * Only the Blanco ledger: Gestión (Facturas X) never reaches the libros contables.
+ */
 export async function loadPeriodDocuments(ctx: OrgContext, from: string, to: string) {
   const docs: BookDocument[] = [];
   for (let page = 0; ; page++) {
@@ -26,6 +29,7 @@ export async function loadPeriodDocuments(ctx: OrgContext, from: string, to: str
       .from("documents")
       .select(SELECT)
       .eq("org_id", ctx.org.id)
+      .eq("ledger", "blanco")
       .in("status", ["issued", "authorized"])
       .gte("issue_date", from)
       .lte("issue_date", to)
@@ -38,7 +42,7 @@ export async function loadPeriodDocuments(ctx: OrgContext, from: string, to: str
   const missing = [...new Set(docs.map((d) => d.source_document_id).filter((id): id is string => !!id && !docs.some((d) => d.id === id)))];
   let related: BookDocument[] = [];
   if (missing.length) {
-    const { data } = await ctx.supabase.from("documents").select(SELECT).in("id", missing.slice(0, 500));
+    const { data } = await ctx.supabase.from("documents").select(SELECT).eq("ledger", "blanco").in("id", missing.slice(0, 500));
     related = ((data ?? []) as unknown as Raw[]).map(normalize);
   }
   return { docs, related };

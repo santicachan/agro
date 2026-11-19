@@ -375,6 +375,7 @@ export interface StatementInputRow {
   amount: number; // signed, base currency, already oriented (+ = owes us for customers)
   concept: string | null;
   source: string | null;
+  ledger?: string | null;
 }
 
 export function buildStatementBook(rows: StatementInputRow[], opts: { orgName: string; partyName: string; partyTaxId: string | null; currency: string; period: string; opening: number; kind: "customer" | "supplier" }): Book {
@@ -385,7 +386,7 @@ export function buildStatementBook(rows: StatementInputRow[], opts: { orgName: s
     balance = r2(balance + m.amount);
     out.push({
       fecha: m.issue_date,
-      comprobante: `${DOC_TYPES[m.type].label}${m.concept && m.concept in CONCEPT_LABEL ? ` (${CONCEPT_LABEL[m.concept as keyof typeof CONCEPT_LABEL]})` : ""} ${m.letter ?? ""} ${formatDocNumber(m.point_of_sale, m.number)}`.replace(/\s+/g, " "),
+      comprobante: `${(m.ledger === "gestion" && m.type === "factura_venta" ? "Factura" : m.ledger === "gestion" && m.type === "factura_compra" ? "Factura de compra" : DOC_TYPES[m.type].label)}${m.concept && m.concept in CONCEPT_LABEL ? ` (${CONCEPT_LABEL[m.concept as keyof typeof CONCEPT_LABEL]})` : ""} ${m.letter ?? ""} ${formatDocNumber(m.point_of_sale, m.number)}`.replace(/\s+/g, " "),
       referencia: m.source ?? (m.amount === 0 ? "Sin importe en cuenta" : ""),
       moneda: m.currency === opts.currency ? "" : `${m.currency} ${m.total.toLocaleString("es-AR", { minimumFractionDigits: 2 })} @ ${m.fx_rate}`,
       debe: m.amount > 0 ? m.amount : null,

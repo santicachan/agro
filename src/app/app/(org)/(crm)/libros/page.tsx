@@ -35,7 +35,10 @@ export default async function BooksPage({ searchParams }: { searchParams: Promis
 
   return (
     <>
-      <PageHeader title="Libros contables" description="Todo lo que necesita tu contadora, listo para descargar y enviar." />
+      <PageHeader
+        title="Libros contables"
+        description="Todo lo que necesita tu contadora, listo para descargar y enviar. Se generan solo con la cuenta Blanco: las Facturas X de Gestión nunca entran."
+      />
 
       <Card className="mb-6">
         <CardContent className="pt-5">

@@ -1,6 +1,7 @@
 import "server-only";
 import type { OrgContext } from "@/lib/auth";
 import { CREDIT_TYPES, type DocType, type Letter, type TaxCondition } from "./documents";
+import { balancesByLedger, movementAmountIn, rateOn, type FxPoint, type Ledger, type ViewCurrency } from "./ledger";
 
 export interface PartyRow {
   id: string;
@@ -38,6 +39,8 @@ export interface DocumentRow {
   source_document_id: string | null;
   concept: string | null;
   meta: Record<string, unknown> | null;
+  ledger: Ledger;
+  usd_rate: number | null;
   arca_response: { status?: string; preparedAt?: string; error?: string } | null;
   parties?: { name: string; tax_id: string | null; tax_condition: TaxCondition | null } | null;
 }
@@ -52,12 +55,65 @@ export async function listParties(ctx: OrgContext, kind: Kind, q?: string) {
   return (data ?? []) as PartyRow[];
 }
 
-/** Balances by party in base currency (positive = they owe us). */
-export async function partyBalances(ctx: OrgContext) {
-  const { data } = await ctx.supabase.from("account_movements").select("party_id, amount").eq("org_id", ctx.org.id);
+/** Balances by party in base currency (positive = they owe us), optionally for one ledger. */
+export async function partyBalances(ctx: OrgContext, ledger?: Ledger) {
+  let q = ctx.supabase.from("account_movements").select("party_id, amount").eq("org_id", ctx.org.id);
+  if (ledger) q = q.eq("ledger", ledger);
+  const { data } = await q;
   const map = new Map<string, number>();
   for (const r of data ?? []) map.set(r.party_id, (map.get(r.party_id) ?? 0) + Number(r.amount));
   return map;
+}
+
+/** Balance per party split by ledger (base currency), with which ledgers each party uses. */
+export async function partyLedgerBalances(ctx: OrgContext) {
+  const { data } = await ctx.supabase.from("account_movements").select("party_id, ledger, amount").eq("org_id", ctx.org.id);
+  return balancesByLedger((data ?? []).map((r) => ({ party_id: r.party_id, ledger: r.ledger === "gestion" ? "gestion" : "blanco", amount: Number(r.amount) })));
+}
+
+/** Published USD rates (fx_snapshots) to value old peso movements in dollars. */
+export async function fxHistory(ctx: OrgContext): Promise<FxPoint[]> {
+  const pair = ctx.org.base_currency === "BRL" ? "USD/BRL" : "USD/ARS";
+  const { data } = await ctx.supabase.from("fx_snapshots").select("as_of, sell").eq("pair", pair).order("as_of").limit(5000);
+  return (data ?? []).map((r) => ({ date: r.as_of as string, rate: Number(r.sell) }));
+}
+
+export interface LedgerMovement {
+  party_id: string;
+  ledger: Ledger;
+  type: DocType;
+  issue_date: string;
+  currency: string;
+  fx_rate: number;
+  total: number;
+  amount: number;
+  usd_rate: number | null;
+}
+
+/** Every movement of the organization (both ledgers), for balances per ledger and currency. */
+export async function ledgerMovements(ctx: OrgContext) {
+  const rows: LedgerMovement[] = [];
+  for (let page = 0; ; page++) {
+    const { data } = await ctx.supabase
+      .from("account_movements")
+      .select("party_id, ledger, type, issue_date, currency, fx_rate, total, amount, usd_rate")
+      .eq("org_id", ctx.org.id)
+      .order("issue_date")
+      .range(page * 1000, page * 1000 + 999);
+    for (const r of data ?? [])
+      rows.push({ ...r, ledger: r.ledger === "gestion" ? "gestion" : "blanco", fx_rate: Number(r.fx_rate), total: Number(r.total), amount: Number(r.amount), usd_rate: r.usd_rate == null ? null : Number(r.usd_rate) } as LedgerMovement);
+    if (!data || data.length < 1000) break;
+  }
+  return rows;
+}
+
+/**
+ * Converter to the view currency. `fallbackRate` (today's rate) is only used when
+ * there is no published rate at all.
+ */
+export function currencyConverter(baseCurrency: string, view: ViewCurrency, history: FxPoint[], fallbackRate: number | null) {
+  const rateFor = (date: string) => rateOn(history, date, fallbackRate);
+  return (m: Pick<LedgerMovement, "type" | "issue_date" | "currency" | "fx_rate" | "total" | "amount" | "usd_rate">) => movementAmountIn(m, view, baseCurrency, rateFor);
 }
 
 export async function getParty(ctx: OrgContext, id: string) {
@@ -81,27 +137,30 @@ export interface StatementRow {
   source_document_id: string | null;
   status: string;
   cae: string | null;
+  ledger: Ledger;
+  usd_rate: number | null;
 }
 
 /**
  * Cuenta corriente of a party, oldest first, in base currency. With `from`, the
  * balance of earlier movements is returned as `opening` (saldo anterior).
  */
-export async function accountStatement(ctx: OrgContext, partyId: string, range: { from?: string; to?: string } = {}) {
+export async function accountStatement(ctx: OrgContext, partyId: string, range: { from?: string; to?: string } = {}, ledger?: Ledger) {
   let q = ctx.supabase
     .from("account_movements")
-    .select("document_id, type, letter, point_of_sale, number, issue_date, due_date, currency, fx_rate, total, amount, concept, source_document_id, status, cae, created_at")
+    .select("document_id, type, letter, point_of_sale, number, issue_date, due_date, currency, fx_rate, total, amount, concept, source_document_id, status, cae, created_at, ledger, usd_rate")
     .eq("org_id", ctx.org.id)
     .eq("party_id", partyId)
     .order("issue_date", { ascending: true })
     .order("created_at", { ascending: true });
+  if (ledger) q = q.eq("ledger", ledger);
   if (range.to) q = q.lte("issue_date", range.to);
   const { data } = await q;
   // Same day: documents that create debt (and remitos) before the ones that cancel it, so the
   // running balance never shows an artificial intermediate value (e.g. a receipt and the
   // exchange-difference note it generated share the same timestamp).
   const rank = (t: DocType) => (CREDIT_TYPES.includes(t) ? 2 : t === "remito" ? 1 : 0);
-  const all = ((data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total), fx_rate: Number(r.fx_rate) })) as StatementRow[])
+  const all = ((data ?? []).map((r) => ({ ...r, amount: Number(r.amount), total: Number(r.total), fx_rate: Number(r.fx_rate), usd_rate: r.usd_rate == null ? null : Number(r.usd_rate), ledger: r.ledger === "gestion" ? "gestion" : "blanco" })) as StatementRow[])
     .map((r, i) => ({ r, i }))
     .sort((a, b) => a.r.issue_date.localeCompare(b.r.issue_date) || rank(a.r.type) - rank(b.r.type) || a.i - b.i)
     .map(({ r }) => r);
@@ -110,13 +169,14 @@ export async function accountStatement(ctx: OrgContext, partyId: string, range: 
   return { opening, rows: all.filter((r) => r.issue_date >= range.from!) };
 }
 
-export async function openItems(ctx: OrgContext, partyId: string, side: "venta" | "compra") {
+export async function openItems(ctx: OrgContext, partyId: string, side: "venta" | "compra", ledger: Ledger = "blanco") {
   const types = side === "venta" ? ["factura_venta", "nota_debito_venta"] : ["factura_compra", "nota_debito_compra"];
   const { data } = await ctx.supabase
     .from("open_items")
     .select("*")
     .eq("org_id", ctx.org.id)
     .eq("party_id", partyId)
+    .eq("ledger", ledger)
     .in("type", types)
     .gt("pending", 0)
     .order("issue_date");
@@ -135,7 +195,7 @@ export async function openItems(ctx: OrgContext, partyId: string, side: "venta" 
   }[];
 }
 
-export async function listDocuments(ctx: OrgContext, opts: { type?: string; partyId?: string; limit?: number } = {}) {
+export async function listDocuments(ctx: OrgContext, opts: { type?: string; partyId?: string; limit?: number; ledger?: Ledger } = {}) {
   let q = ctx.supabase
     .from("documents")
     .select("*, parties(name, tax_id, tax_condition)")
@@ -145,6 +205,7 @@ export async function listDocuments(ctx: OrgContext, opts: { type?: string; part
     .limit(opts.limit ?? 100);
   if (opts.type) q = q.eq("type", opts.type);
   if (opts.partyId) q = q.eq("party_id", opts.partyId);
+  if (opts.ledger) q = q.eq("ledger", opts.ledger);
   const { data } = await q;
   return (data ?? []) as DocumentRow[];
 }
@@ -152,11 +213,11 @@ export async function listDocuments(ctx: OrgContext, opts: { type?: string; part
 export async function chequesInPortfolio(ctx: OrgContext) {
   const { data } = await ctx.supabase
     .from("cheques")
-    .select("id, bank, number, amount, payment_date, drawer_name, electronic")
+    .select("id, bank, number, amount, payment_date, drawer_name, electronic, currency")
     .eq("org_id", ctx.org.id)
     .eq("status", "en_cartera")
     .order("payment_date");
-  return (data ?? []) as { id: string; bank: string; number: string; amount: number; payment_date: string; drawer_name: string | null; electronic: boolean }[];
+  return (data ?? []) as { id: string; bank: string; number: string; amount: number; payment_date: string; drawer_name: string | null; electronic: boolean; currency: string | null }[];
 }
 
 export async function usage(ctx: OrgContext) {
@@ -186,13 +247,14 @@ export async function balancesFor(ctx: OrgContext, ids: string[]) {
 }
 
 /** Invoices/debit notes of a party that a credit/debit note can be associated with. */
-export async function associableDocuments(ctx: OrgContext, partyId: string, side: "venta" | "compra") {
+export async function associableDocuments(ctx: OrgContext, partyId: string, side: "venta" | "compra", ledger: Ledger = "blanco") {
   const types = side === "venta" ? ["factura_venta", "nota_debito_venta"] : ["factura_compra", "nota_debito_compra"];
   const { data } = await ctx.supabase
     .from("documents")
     .select("id, type, letter, point_of_sale, number, issue_date, currency, fx_rate, total")
     .eq("org_id", ctx.org.id)
     .eq("party_id", partyId)
+    .eq("ledger", ledger)
     .in("type", types)
     .in("status", ["issued", "authorized"])
     .order("issue_date", { ascending: false })

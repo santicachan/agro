@@ -41,7 +41,7 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
   let q = ctx.supabase
     .from("cheques")
     .select(
-      "id, kind, electronic, bank, number, drawer_name, amount, payment_date, status, deposited_at, credited_at, rejected_at, rejection_reason, rejection_document_id, supplier_debit_document_id, received:parties!cheques_received_from_fkey(name), delivered:parties!cheques_delivered_to_fkey(name)",
+      "id, kind, electronic, bank, number, drawer_name, amount, currency, payment_date, status, deposited_at, credited_at, rejected_at, rejection_reason, rejection_document_id, supplier_debit_document_id, received:parties!cheques_received_from_fkey(name), delivered:parties!cheques_delivered_to_fkey(name)",
     )
     .eq("org_id", ctx.org.id)
     .order("payment_date");
@@ -58,6 +58,7 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
     number: string;
     drawer_name: string | null;
     amount: number;
+    currency: string | null;
     payment_date: string;
     status: string;
     deposited_at: string | null;
@@ -69,13 +70,22 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
     received: { name: string } | null;
     delivered: { name: string } | null;
   }[];
-  const total = cheques.reduce((s, c) => s + Number(c.amount), 0);
+  const totals = new Map<string, number>();
+  for (const c of cheques) totals.set(c.currency ?? ctx.org.base_currency, (totals.get(c.currency ?? ctx.org.base_currency) ?? 0) + Number(c.amount));
   const today = new Date().toISOString().slice(0, 10);
   const cur = ctx.org.base_currency;
 
   return (
     <>
-      <PageHeader title="Cheques" description="Seguimiento de cheques y eCheqs: pendientes, depositados, cobrados y rechazados." />
+      <PageHeader
+        title="Cheques"
+        description="Seguimiento de cheques y eCheqs: pendientes, depositados, cobrados y rechazados."
+        actions={
+          <Button asChild variant="outline">
+            <Link href="/app/cheques/notas">Notas por cheques rechazados</Link>
+          </Button>
+        }
+      />
       {error ? <Alert tone="error" className="mb-4">{error}</Alert> : null}
       <nav className="mb-4 flex gap-2 overflow-x-auto pb-1" aria-label="Vista">
         {VIEWS.map(([v, label]) => (
@@ -92,7 +102,12 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
       <Card className="mb-4">
         <CardContent className="pt-5">
           <p className="text-sm text-muted-foreground">Total ({cheques.length} cheques)</p>
-          <p className="text-3xl font-bold tabular">{formatMoney(total, cur)}</p>
+          {totals.size === 0 ? <p className="text-3xl font-bold tabular">{formatMoney(0, cur)}</p> : null}
+          {[...totals].map(([currency, amount]) => (
+            <p key={currency} className="text-3xl font-bold tabular">
+              {formatMoney(amount, currency)}
+            </p>
+          ))}
         </CardContent>
       </Card>
       {cheques.length === 0 ? (
@@ -136,11 +151,15 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
                             </Link>
                           </>
                         ) : null}
+                        {" · "}
+                        <Link href={`/app/cheques/notas?cheque=${c.id}`} className="font-medium text-primary hover:underline">
+                          Gastos y diferencia de cambio
+                        </Link>
                       </p>
                     ) : null}
                   </div>
                   <div className="flex shrink-0 flex-col items-start gap-2 sm:items-end">
-                    <p className="text-lg font-bold tabular">{formatMoney(Number(c.amount), cur)}</p>
+                    <p className="text-lg font-bold tabular">{formatMoney(Number(c.amount), c.currency ?? cur)}</p>
                     <Badge variant={st.variant}>{st.label}</Badge>
                     <div className="flex flex-wrap gap-2">
                       {ACTIONS[c.status]?.map((a) => (
@@ -161,8 +180,8 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
                     <form action={rejectCheque} className="mt-3 grid gap-2 sm:grid-cols-[1fr_1fr_auto] sm:items-end">
                       <input type="hidden" name="id" value={c.id} />
                       <label className="text-sm">
-                        Gastos bancarios ({cur}, sin IVA)
-                        <Input name="fee" type="number" inputMode="decimal" step="any" min={0} defaultValue={0} />
+                        Fecha de cobro
+                        <Input name="date" type="date" defaultValue={c.payment_date} required />
                       </label>
                       <label className="text-sm">
                         Motivo
@@ -170,8 +189,9 @@ export default async function ChequesPage({ searchParams }: { searchParams: Prom
                       </label>
                       <Button variant="destructive">Rechazar</Button>
                       <p className="text-xs text-muted-foreground sm:col-span-3">
-                        {c.received ? `Se genera una nota de débito a ${c.received.name} por el cheque más los gastos (con IVA 21%). ` : ""}
-                        {c.delivered ? `Se registra el débito de ${c.delivered.name}, que vuelve a cobrarnos el cheque.` : ""}
+                        {c.received ? `La deuda de ${c.received.name} se actualiza al día de la fecha de cobro con una nota de débito por el cheque. ` : ""}
+                        {c.delivered ? `Se registra el débito de ${c.delivered.name}, que vuelve a cobrarnos el cheque. ` : ""}
+                        Después vas a poder generar la nota por gastos bancarios y diferencia de cambio.
                       </p>
                     </form>
                   </details>

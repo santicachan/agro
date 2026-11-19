@@ -8,7 +8,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/form";
 import { Alert } from "@/components/ui/misc";
 import { createDocument, type DocumentPayload } from "@/lib/crm/actions";
-import { DOC_TYPES, computeTotals, formatDocNumber, type DocType } from "@/lib/crm/documents";
+import { DOC_TYPES, computeTotals, documentLabel, formatDocNumber, type DocType } from "@/lib/crm/documents";
+import type { Ledger } from "@/lib/crm/ledger";
+import { LedgerSwitch } from "./ledger-switch";
 import { formatDate, formatMoney } from "@/lib/format";
 
 export interface Associable {
@@ -45,6 +47,7 @@ export function DocumentForm({
   usdRate,
   associable = [],
   sourceId,
+  ledger = "blanco",
 }: {
   type: DocType;
   parties: { id: string; name: string }[];
@@ -54,9 +57,12 @@ export function DocumentForm({
   usdRate: number | null;
   associable?: Associable[];
   sourceId?: string;
+  ledger?: Ledger;
 }) {
   const isNote = NOTE_TYPES.includes(type);
-  const requiresSource = type === "nota_credito_venta" || type === "nota_debito_venta";
+  const gestion = ledger === "gestion";
+  // ARCA requires the associated invoice; internal Gestión notes don't.
+  const requiresSource = !gestion && (type === "nota_credito_venta" || type === "nota_debito_venta");
   const initialSource = associable.find((a) => a.id === sourceId);
   const router = useRouter();
   const [pending, start] = useTransition();
@@ -65,7 +71,7 @@ export function DocumentForm({
   const [party, setParty] = useState(partyId ?? "");
   const [source, setSource] = useState(initialSource?.id ?? "");
   const [currency, setCurrency] = useState(initialSource?.currency ?? baseCurrency);
-  const [fxRate, setFxRate] = useState(String(initialSource && initialSource.currency !== baseCurrency ? (usdRate ?? initialSource.fx_rate) : (usdRate ?? 1)));
+  const [fxRate, setFxRate] = useState(String(initialSource && initialSource.currency !== baseCurrency ? (usdRate ?? initialSource.fx_rate) : (usdRate ?? "")));
   const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [dueDate, setDueDate] = useState("");
   const isPurchase = DOC_TYPES[type].side === "compra";
@@ -95,6 +101,8 @@ export function DocumentForm({
       fxRate: currency === baseCurrency ? 1 : Number(fxRate),
       notes: notes || undefined,
       sourceDocumentId: source || undefined,
+      ledger,
+      usdRate: Number(fxRate) > 0 ? Number(fxRate) : undefined,
       ...(isPurchase && supplierPos ? { pointOfSale: Number(supplierPos) } : {}),
       ...(isPurchase && supplierNumber ? { number: Number(supplierNumber) } : {}),
       lines: parsedLines,
@@ -108,6 +116,7 @@ export function DocumentForm({
 
   return (
     <div className="space-y-6">
+      <LedgerSwitch type={type} ledger={ledger} partyId={party || undefined} />
       <Card>
         <CardContent className="grid gap-4 pt-5 sm:grid-cols-2">
           <Field label={DOC_TYPES[type].side === "venta" ? "Cliente" : "Proveedor"} htmlFor="party" className="sm:col-span-2">
@@ -117,7 +126,7 @@ export function DocumentForm({
               onChange={(e) => {
                 setParty(e.target.value);
                 // Notes need the party's invoices to associate: reload with the new party.
-                if (isNote) router.push(`/app/comprobantes/nuevo?tipo=${type}&party=${e.target.value}`);
+                if (isNote) router.push(`/app/comprobantes/nuevo?tipo=${type}&party=${e.target.value}${gestion ? "&cuenta=gestion" : ""}`);
               }}
               required
             >
@@ -159,7 +168,7 @@ export function DocumentForm({
               <Field label="Punto de venta del proveedor" htmlFor="supplierPos" hint="Figura en el comprobante, ej. 00012">
                 <Input id="supplierPos" type="number" inputMode="numeric" min={1} max={99999} value={supplierPos} onChange={(e) => setSupplierPos(e.target.value)} />
               </Field>
-              <Field label="Número de comprobante" htmlFor="supplierNumber" hint="Necesario para el Libro IVA Compras">
+              <Field label="Número de comprobante" htmlFor="supplierNumber" hint={gestion ? "Opcional en Gestión" : "Necesario para el Libro IVA Compras"}>
                 <Input id="supplierNumber" type="number" inputMode="numeric" min={1} value={supplierNumber} onChange={(e) => setSupplierNumber(e.target.value)} />
               </Field>
             </>
@@ -176,8 +185,12 @@ export function DocumentForm({
               {baseCurrency !== "USD" ? <option value="USD">USD</option> : null}
             </Select>
           </Field>
-          {currency !== baseCurrency ? (
-            <Field label={`Tipo de cambio (${baseCurrency} por USD)`} htmlFor="fx" hint="Por defecto, dólar mayorista del día.">
+          {baseCurrency !== "USD" ? (
+            <Field
+              label={`Tipo de cambio (${baseCurrency} por USD)`}
+              htmlFor="fx"
+              hint={currency !== baseCurrency ? "Por defecto, dólar mayorista del día." : "Referencia para ver la cuenta corriente en dólares."}
+            >
               <Input id="fx" type="number" inputMode="decimal" step="any" value={fxRate} onChange={(e) => setFxRate(e.target.value)} />
             </Field>
           ) : null}
@@ -238,8 +251,8 @@ export function DocumentForm({
             </p>
             <p className="text-2xl font-bold">{formatMoney(totals.total, currency)}</p>
           </div>
-          <Button size="lg" onClick={submit} disabled={pending || !party || (requiresSource && !source) || (type === "factura_compra" && (!supplierPos || !supplierNumber))}>
-            {pending ? "Guardando…" : `Emitir ${DOC_TYPES[type].label.toLowerCase()}`}
+          <Button size="lg" onClick={submit} disabled={pending || !party || (requiresSource && !source) || (type === "factura_compra" && !gestion && (!supplierPos || !supplierNumber))}>
+            {pending ? "Guardando…" : `Emitir ${gestion && type.startsWith("factura") ? `${documentLabel(type, null, "gestion").toLowerCase()} X` : DOC_TYPES[type].label.toLowerCase()}`}
           </Button>
         </CardContent>
         {error ? (

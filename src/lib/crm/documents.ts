@@ -209,9 +209,15 @@ export const CONCEPT_LABEL: Record<Exclude<DocConcept, null>, string> = {
   cheque_rechazado: "Cheque rechazado",
 };
 
+/** In Gestión, invoices are "Factura X" (the letter X is printed right after the label). */
+const GESTION_LABEL: Partial<Record<DocType, string>> = {
+  factura_venta: "Factura",
+  factura_compra: "Factura de compra",
+};
+
 /** Human label for a document, e.g. "Nota de débito · Diferencia de cambio". */
-export function documentLabel(type: DocType, concept?: string | null): string {
-  const base = DOC_TYPES[type].label;
+export function documentLabel(type: DocType, concept?: string | null, ledger?: string | null): string {
+  const base = (ledger === "gestion" ? GESTION_LABEL[type] : undefined) ?? DOC_TYPES[type].label;
   return concept && concept in CONCEPT_LABEL ? `${base} · ${CONCEPT_LABEL[concept as keyof typeof CONCEPT_LABEL]}` : base;
 }
 

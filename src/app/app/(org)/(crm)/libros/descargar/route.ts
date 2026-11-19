@@ -4,7 +4,9 @@ import { BOOKS, buildBook, buildStatementBook, isBookId, periodLabel, periodRang
 import { loadPeriodDocuments } from "@/lib/books/load";
 import { booksToPdf, booksToXlsx } from "@/lib/books/render";
 import { DOC_TYPES, formatDocNumber } from "@/lib/crm/documents";
-import { accountStatement, getParty } from "@/lib/crm/queries";
+import { parseLedger } from "@/lib/crm/ledger";
+import { accountStatement, currencyConverter, fxHistory, getParty } from "@/lib/crm/queries";
+import { fetchFx } from "@/lib/prices/sources/fx";
 import { site } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
@@ -41,18 +43,37 @@ export async function GET(req: Request) {
     const kind = party.kind === "supplier" ? "supplier" : "customer";
     const sign = kind === "customer" ? 1 : -1;
     const range = { from: isDate(url.searchParams.get("desde")), to: isDate(url.searchParams.get("hasta")) };
-    const { opening, rows } = await accountStatement(ctx, partyId, range);
+    const ledger = parseLedger(url.searchParams.get("cuenta"));
+    const inUsd = url.searchParams.get("moneda") === "USD" && cur !== "USD";
+    const { rows: ledgerRows } = await accountStatement(ctx, partyId, {}, ledger);
     const { rows: all } = await accountStatement(ctx, partyId);
     const numbers = new Map(all.map((r) => [r.document_id, `${DOC_TYPES[r.type].short} ${r.letter ?? ""} ${formatDocNumber(r.point_of_sale, r.number)}`.replace(/\s+/g, " ")]));
+    let value = (r: (typeof ledgerRows)[number]) => r.amount;
+    if (inUsd) {
+      const [history, fx] = await Promise.all([fxHistory(ctx), fetchFx().catch(() => ({ items: [] }))]);
+      const conv = currencyConverter(cur, "USD", history, fx.items.find((f) => f.pair === (cur === "BRL" ? "USD/BRL" : "USD/ARS"))?.sell ?? null);
+      value = (r) => conv(r) ?? 0;
+    }
+    const valued = ledgerRows.map((r) => ({ ...r, amount: value(r) }));
+    const opening = range.from ? Math.round(valued.filter((r) => r.issue_date < range.from!).reduce((s, r) => s + r.amount, 0) * 100) / 100 : 0;
+    const rows = valued.filter((r) => (!range.from || r.issue_date >= range.from) && (!range.to || r.issue_date <= range.to));
     const fmt = (d?: string) => (d ? d.split("-").reverse().join("/") : "");
     const period = range.from || range.to ? `${range.from ? `Desde ${fmt(range.from)}` : ""} ${range.to ? `hasta ${fmt(range.to)}` : ""}`.trim() : `Al ${fmt(new Date().toISOString().slice(0, 10))}`;
     books = [
       buildStatementBook(
         rows.map((r) => ({ ...r, amount: r.amount * sign, source: r.source_document_id ? (numbers.get(r.source_document_id) ?? null) : null })),
-        { orgName: ctx.org.name, partyName: party.name, partyTaxId: party.tax_id, currency: cur, period, opening: opening * sign, kind },
+        {
+          orgName: ctx.org.name,
+          partyName: ledger === "gestion" ? `${party.name} · Cuenta Gestión` : party.name,
+          partyTaxId: party.tax_id,
+          currency: inUsd ? "USD" : cur,
+          period,
+          opening: opening * sign,
+          kind,
+        },
       ),
     ];
-    filename = `cuenta-corriente-${slug(party.name)}`;
+    filename = `cuenta-corriente-${ledger}-${slug(party.name)}${inUsd ? "-usd" : ""}`;
   } else {
     const year = Number(url.searchParams.get("anio")) || new Date().getFullYear();
     const monthParam = Number(url.searchParams.get("mes"));

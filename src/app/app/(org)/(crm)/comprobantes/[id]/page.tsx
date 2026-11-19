@@ -5,19 +5,21 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, Badge, PageHeader, Table, Td, Th } from "@/components/ui/misc";
 import { DocBadges } from "@/components/crm/doc-badges";
+import { LedgerBadge } from "@/components/crm/ledger-tabs";
 import { PrintButton } from "@/components/crm/print-button";
 import { requireCrm } from "@/lib/auth";
 import { authorizeWithArca, invoiceFromRemito, remitoFromInvoice } from "@/lib/crm/actions";
 import { isArcaConfigured } from "@/lib/crm/arca";
 import { DOC_TYPES, TAX_CONDITIONS, documentLabel, formatDocNumber, type DocType } from "@/lib/crm/documents";
+import { PAYMENT_METHOD_LABEL, type PaymentMethod } from "@/lib/crm/payloads";
 import { balancesFor, type DocumentRow } from "@/lib/crm/queries";
 import { formatDate, formatMoney, formatNumber } from "@/lib/format";
 
 export const metadata = { title: "Comprobante" };
 
-type Ref = { id: string; type: DocType; letter: string | null; point_of_sale: number; number: number; issue_date: string; currency: string; total: number; concept: string | null };
+type Ref = { id: string; type: DocType; letter: string | null; point_of_sale: number; number: number; issue_date: string; currency: string; total: number; concept: string | null; ledger?: string | null };
 const refLabel = (d: Pick<Ref, "type" | "letter" | "point_of_sale" | "number">) => `${DOC_TYPES[d.type].short} ${d.letter ?? ""} ${formatDocNumber(d.point_of_sale, d.number)}`.replace(/\s+/g, " ");
-const REF_COLS = "id, type, letter, point_of_sale, number, issue_date, currency, total, concept";
+const REF_COLS = "id, type, letter, point_of_sale, number, issue_date, currency, total, concept, ledger";
 
 export default async function DocumentPage({
   params,
@@ -59,9 +61,12 @@ export default async function DocumentPage({
   ]);
 
   const meta = DOC_TYPES[doc.type];
+  const gestion = doc.ledger === "gestion";
+  const fiscal = meta.fiscal && !gestion;
+  const cuentaQs = gestion ? "&cuenta=gestion" : "";
   const pending = balances.get(id);
   const authorized = doc.status === "authorized";
-  const canAuthorize = meta.fiscal && !authorized && ["owner", "admin"].includes(ctx.role);
+  const canAuthorize = fiscal && !authorized && ["owner", "admin"].includes(ctx.role);
   const arca = doc.arca_response ?? null;
   const arcaErrors: string[] = sp.arca_errors ? (JSON.parse(sp.arca_errors) as string[]) : [];
   const fx = (doc.meta ?? {}) as { invoiceFx?: number; paymentFx?: number; appliedForeign?: number; invoiceCurrency?: string; bank?: string; number?: string; fee?: number };
@@ -73,13 +78,19 @@ export default async function DocumentPage({
   return (
     <>
       <PageHeader
-        title={`${documentLabel(doc.type, doc.concept)} ${doc.letter ?? ""} ${formatDocNumber(doc.point_of_sale, doc.number)}`}
-        description={`${formatDate(`${doc.issue_date}T12:00:00`)} · ${doc.parties?.name ?? ""}`}
+        title={`${documentLabel(doc.type, doc.concept, doc.ledger)} ${doc.letter ?? ""} ${formatDocNumber(doc.point_of_sale, doc.number)}`}
+        description={`${formatDate(`${doc.issue_date}T12:00:00`)} · ${doc.parties?.name ?? ""} · Cuenta ${gestion ? "Gestión (interna)" : "Blanco"}`}
         actions={<PrintButton />}
       />
 
       {sp.error ? <Alert tone="error" className="mb-4">{sp.error}</Alert> : null}
       {sp.cheque === "rechazado" ? <Alert className="mb-4">Cheque rechazado: generamos esta nota de débito automáticamente y ya impacta en la cuenta corriente.</Alert> : null}
+      {sp.cheque === "nota" ? <Alert className="mb-4">Nota generada por el cheque rechazado. Ya impacta en la cuenta corriente.</Alert> : null}
+      {gestion ? (
+        <Alert tone="warning" className="mb-4">
+          Comprobante de la cuenta <strong>Gestión</strong>: es interno, no se envía a ARCA y no aparece en los libros contables.
+        </Alert>
+      ) : null}
       {sp.arca === "ok" ? <Alert className="mb-4">Comprobante autorizado por ARCA.</Alert> : null}
       {sp.arca === "listo" ? (
         <Alert className="mb-4">
@@ -118,16 +129,16 @@ export default async function DocumentPage({
         ) : null}
         {pending != null && pending > 0 && (meta.side === "venta" ? ["factura_venta", "nota_debito_venta"] : ["factura_compra", "nota_debito_compra"]).includes(doc.type) ? (
           <Button asChild size="lg" variant="secondary">
-            <Link href={`/app/comprobantes/nuevo?tipo=${meta.side === "venta" ? "recibo" : "orden_pago"}&party=${doc.party_id}`}>{meta.side === "venta" ? "Cobrar" : "Pagar"}</Link>
+            <Link href={`/app/comprobantes/nuevo?tipo=${meta.side === "venta" ? "recibo" : "orden_pago"}&party=${doc.party_id}${cuentaQs}`}>{meta.side === "venta" ? "Cobrar" : "Pagar"}</Link>
           </Button>
         ) : null}
         {["factura_venta", "nota_debito_venta", "factura_compra", "nota_debito_compra"].includes(doc.type) ? (
           <>
             <Button asChild size="lg" variant="outline">
-              <Link href={`/app/comprobantes/nuevo?tipo=nota_credito_${noteSide}&party=${doc.party_id}&origen=${doc.id}`}>Nota de crédito</Link>
+              <Link href={`/app/comprobantes/nuevo?tipo=nota_credito_${noteSide}&party=${doc.party_id}&origen=${doc.id}${cuentaQs}`}>Nota de crédito</Link>
             </Button>
             <Button asChild size="lg" variant="outline">
-              <Link href={`/app/comprobantes/nuevo?tipo=nota_debito_${noteSide}&party=${doc.party_id}&origen=${doc.id}`}>Nota de débito</Link>
+              <Link href={`/app/comprobantes/nuevo?tipo=nota_debito_${noteSide}&party=${doc.party_id}&origen=${doc.id}${cuentaQs}`}>Nota de débito</Link>
             </Button>
           </>
         ) : null}
@@ -143,7 +154,10 @@ export default async function DocumentPage({
               </p>
             </div>
             <div className="text-right text-sm">
-              <DocBadges type={doc.type} total={Number(doc.total)} pending={pending} status={doc.status} concept={doc.concept} fiscal={meta.fiscal} arcaStatus={arca?.status} />
+              <span className="flex flex-wrap justify-end gap-1">
+                <LedgerBadge ledger={doc.ledger} />
+                <DocBadges type={doc.type} total={Number(doc.total)} pending={pending} status={doc.status} concept={doc.concept} fiscal={fiscal} arcaStatus={arca?.status} />
+              </span>
               <p className="mt-2 font-semibold">{doc.parties?.name}</p>
               <p className="text-muted-foreground">
                 {doc.parties?.tax_id ?? ""} {doc.parties?.tax_condition ? `· ${TAX_CONDITIONS[doc.parties.tax_condition]}` : ""}
@@ -194,8 +208,8 @@ export default async function DocumentPage({
                 <ul className="space-y-1 text-sm">
                   {doc.payment_items.map((p) => (
                     <li key={p.id} className="flex justify-between gap-3 border-b py-2">
-                      <span className="capitalize">
-                        {p.method}
+                      <span>
+                        {PAYMENT_METHOD_LABEL[p.method as PaymentMethod] ?? p.method}
                         {p.cheques ? (
                           <>
                             {" — "}
@@ -238,7 +252,7 @@ export default async function DocumentPage({
         </Card>
 
         <div className="space-y-4">
-          {meta.fiscal ? (
+          {fiscal ? (
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -307,6 +321,7 @@ function RefList({ title, items, cur }: { title: string; items: { ref: Ref; amou
           <li key={`${title}-${ref.id}`} className="flex justify-between gap-2">
             <Link href={`/app/comprobantes/${ref.id}`} className="text-primary hover:underline">
               {refLabel(ref)}
+              {ref.ledger === "gestion" ? " (Gestión)" : ""}
               {ref.concept === "diferencia_cambio" ? " (dif. cambio)" : ref.concept === "cheque_rechazado" ? " (cheque rechazado)" : ""}
             </Link>
             <span className="text-right tabular text-muted-foreground">

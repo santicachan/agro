@@ -157,6 +157,61 @@ describe("flujo comercial completo", () => {
     expect(await balance(other)).toBe(0);
   });
 
+  it("ND por cheque rechazado queda fechada al día de cobro", async () => {
+    const [ch] = await q<{ rejection_document_id: string }>(`select rejection_document_id from cheques where bank = 'Banco Nación' and number = '00012345'`);
+    const [nd] = await q<{ issue_date: string; due_date: string; ledger: string }>(`select issue_date::text, due_date::text, ledger from documents where id = $1`, [ch.rejection_document_id]);
+    expect(nd).toMatchObject({ issue_date: "2026-12-02", due_date: "2026-12-02", ledger: "blanco" });
+  });
+
+  it("cuenta Gestión: Factura X, cobro con insumo/vehículo, sin mezclar con Blanco", async () => {
+    const before = await balance(customer);
+    const fx = await rpc(buildDocumentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "factura_venta", issueDate: "2026-11-27", currency: "ARS", fxRate: 1, ledger: "gestion", usdRate: 1500,
+      lines: [{ description: "Gasoil", quantity: 1, unitPrice: 100000, vatRate: 21 }],
+    }));
+    const [doc] = await q<{ letter: string; ledger: string; vat: string; usd_rate: string }>(`select letter, ledger, vat, usd_rate from documents where id = $1`, [fx]);
+    expect(doc).toMatchObject({ letter: "X", ledger: "gestion", usd_rate: "1500.000000" });
+    // X invoices never get a CAE.
+    await expect(q(`update documents set status = 'authorized', cae = '1' where id = $1`, [fx])).rejects.toThrow();
+    const total = Number((await q<{ total: string }>(`select total from documents where id = $1`, [fx]))[0].total);
+    const inv: InvoiceForPayment = { id: fx, type: "factura_venta", letter: "X", point_of_sale: 1, number: 1, currency: "ARS", fx_rate: 1, total, lines: [{ vat_rate: 21, net: 100000 }] };
+    // A Blanco receipt cannot cancel a Gestión invoice.
+    await expect(rpc(buildPaymentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "recibo", issueDate: "2026-11-28", fxRate: 1, items: [{ method: "efectivo", amount: total }], applications: [{ invoiceId: fx, amount: total }],
+    }, [inv]))).rejects.toThrow(/LEDGER/);
+    const receipt = await rpc(buildPaymentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "recibo", issueDate: "2026-11-28", fxRate: 1, ledger: "gestion",
+      items: [{ method: "insumo", amount: total / 2, reference: "Urea 2 t" }, { method: "vehiculo", amount: total / 2, reference: "Hilux 2019" }],
+      applications: [{ invoiceId: fx, amount: total }],
+    }, [inv]));
+    expect((await q(`select ledger from documents where id = $1`, [receipt]))[0].ledger).toBe("gestion");
+    expect((await q<{ m: string }>(`select string_agg(method, ',' order by method) m from payment_items where document_id = $1`, [receipt]))[0].m).toBe("insumo,vehiculo");
+    expect(await pending(fx)).toBe(0);
+    expect(await balance(customer)).toBe(before);
+    const ledgers = await q<{ ledger: string }>(`select distinct ledger from account_movements where party_id = $1 order by 1`, [customer]);
+    expect(ledgers.map((r) => r.ledger)).toEqual(["blanco", "gestion"]);
+  });
+
+  it("cobro en dólares de una factura en dólares", async () => {
+    const fv = await rpc(buildDocumentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "factura_venta", issueDate: "2026-11-27", currency: "USD", fxRate: 1500, lines: [{ description: "Semilla", quantity: 1, unitPrice: 1000, vatRate: 10.5 }],
+    }));
+    const inv: InvoiceForPayment = { id: fv, type: "factura_venta", letter: "A", point_of_sale: 1, number: 9, currency: "USD", fx_rate: 1500, total: 1105, lines: [{ vat_rate: 10.5, net: 1000 }] };
+    const receipt = await rpc(buildPaymentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "recibo", issueDate: "2026-11-29", fxRate: 1520, currency: "USD", items: [{ method: "transferencia", amount: 1105 }], applications: [{ invoiceId: fv, amount: 1105 }],
+    }, [inv]));
+    expect((await q(`select currency from documents where id = $1`, [receipt]))[0].currency).toBe("USD");
+    expect(await pending(fv)).toBe(0);
+    expect(await pending(receipt)).toBe(0);
+  });
+
+  it("canje con camioneta o insumos", async () => {
+    await q(`insert into grain_swaps(org_id, party_id, kind, description, unit, tons, price_usd_t) values ($1, $2, 'camioneta', 'Toyota Hilux 2021', 'u', 1, 30000)`, [org, customer]);
+    await q(`insert into grain_swaps(org_id, party_id, kind, description, unit, tons, price_usd_t) values ($1, $2, 'insumos', 'Glifosato bidón 20 L', 'bidón', 50, 90)`, [org, customer]);
+    await expect(q(`insert into grain_swaps(org_id, party_id, kind, tons, price_usd_t) values ($1, $2, 'granos', 10, 300)`, [org, customer])).rejects.toThrow();
+    expect((await q(`select count(*)::int n from grain_swaps where kind <> 'granos'`))[0].n).toBe(2);
+  });
+
   it("plan gratis no ve ni crea datos del CRM", async () => {
     await db.exec(`reset role; update organizations set plan_id = 'free' where id = '${org}'; set role authenticated;`);
     expect((await q(`select count(*)::int n from documents`))[0].n).toBe(0);

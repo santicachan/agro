@@ -7,7 +7,8 @@ import { requireCrm } from "@/lib/auth";
 import { friendlyDbError } from "@/lib/billing/plans";
 import { arcaPreflight, buildFECAERequest, getEInvoicingProvider, isArcaConfigured, type ArcaDocument } from "./arca";
 import { computeTotals, formatCuit, isValidCuit } from "./documents";
-import { buildDocumentRpc, buildPaymentRpc } from "./payloads";
+import { chequeAdjustment } from "./cheque-adjustments";
+import { PAYMENT_METHODS, buildDocumentRpc, buildPaymentRpc, letterFor } from "./payloads";
 
 export interface ActionState {
   error?: string;
@@ -69,6 +70,8 @@ const documentSchema = z.object({
   otherTaxes: z.coerce.number().min(0).default(0),
   notes: optional,
   sourceDocumentId: optional,
+  ledger: z.enum(["blanco", "gestion"]).default("blanco"),
+  usdRate: z.coerce.number().positive().optional(),
   lines: z.array(lineSchema).min(1, "Agregá al menos un renglón"),
 });
 
@@ -87,8 +90,9 @@ export async function createDocument(payload: DocumentPayload): Promise<ActionSt
 
   let applyToSource: number | null = null;
   if (d.sourceDocumentId && NOTE_TYPES.includes(d.type)) {
-    const { data: src } = await supabase.from("documents").select("currency, party_id").eq("id", d.sourceDocumentId).eq("org_id", org.id).single();
+    const { data: src } = await supabase.from("documents").select("currency, party_id, ledger").eq("id", d.sourceDocumentId).eq("org_id", org.id).single();
     if (!src || src.party_id !== d.partyId) return { error: "El comprobante asociado no corresponde a este cliente/proveedor" };
+    if ((src.ledger ?? "blanco") !== d.ledger) return { error: "El comprobante asociado es de otra cuenta (Blanco / Gestión)" };
     if (src.currency !== d.currency) return { error: `La nota tiene que estar en la misma moneda que el comprobante asociado (${src.currency})` };
     // A credit note cancels (part of) the associated invoice.
     if (d.type.startsWith("nota_credito")) {
@@ -112,11 +116,14 @@ export async function createDocument(payload: DocumentPayload): Promise<ActionSt
       notes: d.notes,
       sourceDocumentId: d.sourceDocumentId,
       applyToSource,
+      ledger: d.ledger,
+      usdRate: d.usdRate ?? null,
       lines: d.lines,
     }),
   );
   if (error) return { error: friendlyDbError(error.message) };
   revalidatePath("/app/comprobantes");
+  revalidatePath("/app/cuentas");
   return { ok: true, id: id as string };
 }
 
@@ -136,6 +143,8 @@ async function copyDocument(sourceId: string, from: "remito" | "factura_venta", 
     fxRate: Number(src.fx_rate),
     pointOfSale: src.point_of_sale,
     sourceDocumentId: src.id,
+    ledger: src.ledger === "gestion" ? "gestion" : "blanco",
+    usdRate: Number(src.usd_rate) > 0 ? Number(src.usd_rate) : undefined,
     notes: src.notes ?? undefined,
     lines: rowsToLines(src.document_lines as LineRow[]),
   });
@@ -164,6 +173,7 @@ export async function authorizeWithArca(documentId: string) {
   if (!doc) redirect("/app/comprobantes");
   if (doc.status === "authorized") redirect(`/app/comprobantes/${documentId}`);
   const back = (q: string) => redirect(`/app/comprobantes/${documentId}?${q}`);
+  if (doc.ledger === "gestion") back(`error=${encodeURIComponent("Los comprobantes de Gestión (Factura X) son internos y no se envían a ARCA.")}`);
 
   const lines = (doc.document_lines as { quantity: number; unit_price: number; vat_rate: number; description: string }[]).map((l) => ({
     description: l.description,
@@ -243,11 +253,13 @@ const paymentSchema = z.object({
   partyId: z.uuid("Elegí un cliente o proveedor"),
   issueDate: trimmed.regex(/^\d{4}-\d{2}-\d{2}$/),
   fxRate: z.coerce.number().positive().default(1),
+  currency: z.enum(["ARS", "USD", "BRL"]).optional(),
+  ledger: z.enum(["blanco", "gestion"]).default("blanco"),
   notes: optional,
   items: z
     .array(
       z.object({
-        method: z.enum(["efectivo", "transferencia", "cheque", "echeq", "retencion", "granos"]),
+        method: z.enum(PAYMENT_METHODS),
         amount: z.coerce.number().positive("Cada medio de pago necesita un importe"),
         reference: optional,
         chequeId: optional,
@@ -283,9 +295,11 @@ export async function createPayment(payload: PaymentPayload): Promise<ActionStat
 
   const ids = p.applications.map((a) => a.invoiceId);
   const { data: invoices } = ids.length
-    ? await supabase.from("documents").select("id, type, letter, point_of_sale, number, currency, fx_rate, total, party_id, document_lines(vat_rate, net)").in("id", ids).eq("org_id", org.id)
+    ? await supabase.from("documents").select("id, type, letter, point_of_sale, number, currency, fx_rate, total, party_id, ledger, document_lines(vat_rate, net)").in("id", ids).eq("org_id", org.id)
     : { data: [] as never[] };
   if (p.applications.some((a) => !invoices?.some((i) => i.id === a.invoiceId && i.party_id === p.partyId))) return { error: "Comprobante a cancelar inexistente" };
+  if (invoices?.some((i) => (i.ledger ?? "blanco") !== p.ledger)) return { error: "Solo se pueden cancelar comprobantes de la misma cuenta (Blanco / Gestión)" };
+  if (p.currency && p.currency !== org.base_currency && p.currency !== "USD") return { error: "Moneda no admitida" };
 
   let args;
   try {
@@ -302,6 +316,7 @@ export async function createPayment(payload: PaymentPayload): Promise<ActionStat
   if (error) return { error: friendlyDbError(error.message) };
   revalidatePath("/app/comprobantes");
   revalidatePath("/app/cheques");
+  revalidatePath("/app/cuentas");
   return { ok: true, id: id as string };
 }
 
@@ -323,18 +338,112 @@ export async function updateChequeStatus(formData: FormData) {
   revalidatePath("/app/cheques");
 }
 
-/** Rejected cheque: books the debit note(s) automatically (see reject_cheque in SQL). */
+const isoDate = (v: FormDataEntryValue | null) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+
+/**
+ * Rejected cheque: re-opens the debt dated on the collection day (fecha de cobro)
+ * with a debit note, in the same ledger as the original receipt (see reject_cheque
+ * in SQL). Bank fees and the exchange difference are billed next, from
+ * "Notas por cheques rechazados".
+ */
 export async function rejectCheque(formData: FormData) {
   const { supabase, org } = await requireCrm();
   const id = String(formData.get("id"));
   const fee = Math.max(0, Number(formData.get("fee")) || 0);
   const reason = String(formData.get("reason") ?? "").trim() || null;
-  const { data: cheque } = await supabase.from("cheques").select("id").eq("id", id).eq("org_id", org.id).single();
+  const { data: cheque } = await supabase.from("cheques").select("id, payment_date").eq("id", id).eq("org_id", org.id).single();
   if (!cheque) redirect("/app/cheques");
-  const { data: docId, error } = await supabase.rpc("reject_cheque", { p_cheque: id, p_fee: fee, p_fee_vat_rate: 21, p_reason: reason });
+  const collectionDate = isoDate(formData.get("date")) ?? cheque.payment_date ?? new Date().toISOString().slice(0, 10);
+  const { error } = await supabase.rpc("reject_cheque", { p_cheque: id, p_fee: fee, p_fee_vat_rate: 21, p_reason: reason, p_date: collectionDate });
   revalidatePath("/app/cheques");
+  revalidatePath("/app/cuentas");
   if (error) redirect(`/app/cheques?ver=todos&error=${encodeURIComponent(friendlyDbError(error.message))}`);
-  redirect(docId ? `/app/comprobantes/${docId}?cheque=rechazado` : "/app/cheques?ver=todos");
+  redirect(`/app/cheques/notas?cheque=${id}&rechazado=1`);
+}
+
+/**
+ * Notas por cheque rechazado: bills the bank fees plus the exchange difference
+ * between the invoice day and the collection day. A higher rate on the collection
+ * day → Nota de débito; lower → Nota de crédito. Fees always go in a debit note.
+ */
+const chequeNoteSchema = z.object({
+  id: z.uuid(),
+  fee: z.coerce.number().min(0).default(0),
+  feeVatRate: z.coerce.number().min(0).max(27).default(21),
+  base: z.coerce.number().min(0).default(0),
+  invoiceFx: z.coerce.number().min(0).default(0),
+  collectionFx: z.coerce.number().min(0).default(0),
+  diffVatRate: z.coerce.number().min(0).max(27).default(21),
+  date: trimmed.regex(/^\d{4}-\d{2}-\d{2}$/, "Fecha de cobro"),
+});
+
+export async function createChequeNotes(formData: FormData) {
+  const { supabase, org } = await requireCrm();
+  const parsed = chequeNoteSchema.safeParse(Object.fromEntries(formData));
+  const id = String(formData.get("id") ?? "");
+  const back = (q: string) => redirect(`/app/cheques/notas?cheque=${id}&${q}`);
+  if (!parsed.success) back(`error=${encodeURIComponent(parsed.error.issues[0]?.message ?? "Datos inválidos")}`);
+  const f = parsed.data!;
+  const { data: cheque } = await supabase
+    .from("cheques")
+    .select("id, bank, number, amount, currency, status, received_from, delivered_to, received_document_id, delivered_document_id, rejection_document_id, supplier_debit_document_id")
+    .eq("id", f.id)
+    .eq("org_id", org.id)
+    .single();
+  if (!cheque || cheque.status !== "rechazado") back(`error=${encodeURIComponent("Solo se generan notas para cheques rechazados")}`);
+  const c = cheque!;
+  const partyId = c.received_from ?? c.delivered_to;
+  const side = c.received_from ? "venta" : "compra";
+  const sourceId = c.received_from ? (c.rejection_document_id ?? c.received_document_id) : (c.supplier_debit_document_id ?? c.delivered_document_id);
+  const { data: party } = await supabase.from("parties").select("id, tax_condition").eq("id", partyId).eq("org_id", org.id).single();
+  const { data: src } = sourceId ? await supabase.from("documents").select("id, ledger, point_of_sale").eq("id", sourceId).single() : { data: null };
+  if (!party) back(`error=${encodeURIComponent("Cliente/proveedor inexistente")}`);
+  const ledger = src?.ledger === "gestion" ? "gestion" : "blanco";
+
+  const plan = chequeAdjustment({
+    side,
+    fee: f.fee,
+    feeVatRate: ledger === "gestion" ? 0 : f.feeVatRate,
+    base: f.base,
+    invoiceFx: f.invoiceFx,
+    collectionFx: f.collectionFx,
+    diffVatRate: ledger === "gestion" ? 0 : f.diffVatRate,
+  });
+  if (!plan.notes.length) back(`error=${encodeURIComponent("No hay importes para facturar: cargá gastos bancarios o tipos de cambio distintos.")}`);
+
+  const label = `${c.bank} Nº ${c.number}`;
+  const created: string[] = [];
+  for (const n of plan.notes) {
+    const { data: docId, error } = await supabase.rpc("create_document", {
+      p_doc: {
+        org_id: org.id,
+        party_id: party!.id,
+        type: n.type,
+        ledger,
+        letter: letterFor(n.type, org, party!, ledger),
+        point_of_sale: side === "venta" ? (src?.point_of_sale ?? 1) : 1,
+        issue_date: f.date,
+        due_date: f.date,
+        currency: org.base_currency,
+        fx_rate: 1,
+        usd_rate: f.collectionFx > 0 ? f.collectionFx : null,
+        net: n.net,
+        vat: n.vat,
+        total: n.total,
+        status: "issued",
+        source_document_id: sourceId ?? null,
+        concept: n.concept,
+        meta: { chequeId: c.id, bank: c.bank, number: c.number, invoiceFx: f.invoiceFx || null, paymentFx: f.collectionFx || null, collectionFx: f.collectionFx || null, base: f.base, fee: f.fee, collectionDate: f.date },
+        notes: `${n.concept === "diferencia_cambio" ? "Diferencia de cambio" : "Gastos bancarios"} por cheque rechazado ${label}`,
+      },
+      p_lines: n.lines.map((l) => ({ description: `${l.description} — cheque ${label}`, quantity: 1, unit: "u", unit_price: l.net, vat_rate: l.vatRate, net: l.net, vat: l.vat })),
+    });
+    if (error) back(`error=${encodeURIComponent(friendlyDbError(error.message))}`);
+    created.push(docId as string);
+  }
+  revalidatePath("/app/cheques");
+  revalidatePath("/app/cuentas");
+  redirect(created.length === 1 ? `/app/comprobantes/${created[0]}?cheque=nota` : `/app/cheques/notas?cheque=${c.id}&ok=${created.length}`);
 }
 
 // ─────────────────────────────────────────────── Configuración (empresa + ARCA)
@@ -367,15 +476,21 @@ export async function saveSettings(_: ActionState, formData: FormData): Promise<
 }
 
 // ─────────────────────────────────────────────── Canje
-const swapSchema = z.object({
-  partyId: z.uuid("Elegí un cliente"),
-  crop: z.enum(["soja", "maiz", "trigo", "girasol", "sorgo", "cebada"]),
-  tons: z.coerce.number().positive("Toneladas mayores a 0"),
-  priceUsdT: z.coerce.number().positive("Precio mayor a 0"),
-  referencePriceSource: optional,
-  deliveryFrom: optional,
-  deliveryTo: optional,
-});
+const swapSchema = z
+  .object({
+    partyId: z.uuid("Elegí un cliente"),
+    kind: z.enum(["granos", "camioneta", "insumos"]).default("granos"),
+    crop: z.enum(["soja", "maiz", "trigo", "girasol", "sorgo", "cebada"]).optional(),
+    description: optional,
+    unit: trimmed.default("t"),
+    tons: z.coerce.number().positive("La cantidad debe ser mayor a 0"),
+    priceUsdT: z.coerce.number().positive("Precio mayor a 0"),
+    referencePriceSource: optional,
+    deliveryFrom: optional,
+    deliveryTo: optional,
+  })
+  .refine((s) => s.kind !== "granos" || !!s.crop, { message: "Elegí el grano" })
+  .refine((s) => s.kind === "granos" || !!s.description, { message: "Describí la camioneta o los insumos del canje" });
 
 export async function createSwap(_: ActionState, formData: FormData): Promise<ActionState> {
   const { supabase, org } = await requireCrm();
@@ -385,10 +500,13 @@ export async function createSwap(_: ActionState, formData: FormData): Promise<Ac
   const { error } = await supabase.from("grain_swaps").insert({
     org_id: org.id,
     party_id: s.partyId,
-    crop: s.crop,
+    kind: s.kind,
+    crop: s.kind === "granos" ? s.crop : null,
+    description: s.description,
+    unit: s.kind === "granos" ? "t" : s.kind === "camioneta" ? "u" : s.unit || "u",
     tons: s.tons,
     price_usd_t: s.priceUsdT,
-    reference_price_source: s.referencePriceSource,
+    reference_price_source: s.kind === "granos" ? s.referencePriceSource : null,
     delivery_from: s.deliveryFrom,
     delivery_to: s.deliveryTo,
   });
