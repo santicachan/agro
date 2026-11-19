@@ -1,16 +1,13 @@
 import Link from "next/link";
-import { FileText, Receipt, Truck, Users } from "lucide-react";
+import { FileText, Handshake, Receipt, Truck, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/misc";
-import { Change } from "@/components/prices/price-table";
-import { PriceFreshness } from "@/components/prices/price-freshness";
 import { requireCrm } from "@/lib/auth";
 import { usagePct } from "@/lib/billing/plans";
-import { chequesInPortfolio, partyBalances, usage } from "@/lib/crm/queries";
-import { getPriceBoard } from "@/lib/prices";
-import { formatMoney, formatNumber } from "@/lib/format";
-import { CROPS, type Crop } from "@/lib/units";
+import { chequesInPortfolio, partyLedgerBalances, usage } from "@/lib/crm/queries";
+import { completedDeals } from "@/lib/marketplace/deals";
+import { formatMoney } from "@/lib/format";
 
 export const metadata = { title: "Inicio" };
 
@@ -23,20 +20,30 @@ const QUICK = [
 
 export default async function DashboardPage() {
   const ctx = await requireCrm();
-  const [balances, cheques, use, board] = await Promise.all([partyBalances(ctx), chequesInPortfolio(ctx), usage(ctx), getPriceBoard()]);
-  let receivable = 0;
-  let payable = 0;
-  for (const v of balances.values()) {
-    if (v > 0) receivable += v;
-    else payable += -v;
+  const [balances, cheques, use, deals] = await Promise.all([partyLedgerBalances(ctx), chequesInPortfolio(ctx), usage(ctx), completedDeals(ctx)]);
+  const totals = { blanco: { receivable: 0, payable: 0 }, gestion: { receivable: 0, payable: 0 } };
+  for (const b of balances.values()) {
+    for (const l of ["blanco", "gestion"] as const) {
+      const v = b[l];
+      if (v > 0) totals[l].receivable += v;
+      else totals[l].payable += -v;
+    }
   }
-  const chequesTotal = cheques.reduce((s, c) => s + Number(c.amount), 0);
   const cur = ctx.org.base_currency;
-  const crops: Crop[] = ["soja", "maiz", "trigo", "girasol"];
+  const chequesTotal = cheques.filter((c) => (c.currency ?? cur) === cur).reduce((s, c) => s + Number(c.amount), 0);
 
   return (
     <>
-      <PageHeader title={`Hola, ${ctx.org.name}`} />
+      <PageHeader
+        title={`Hola, ${ctx.org.name}`}
+        actions={
+          <Button asChild size="lg" variant="outline">
+            <Link href="/app/negocios">
+              <Handshake /> Negocios hechos en Marketplace
+            </Link>
+          </Button>
+        }
+      />
       <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
         {QUICK.map((q) => (
           <Button key={q.href} asChild size="lg" variant="secondary" className="h-20 flex-col gap-1">
@@ -48,32 +55,45 @@ export default async function DashboardPage() {
         ))}
       </div>
       <div className="mb-6 grid gap-3 sm:grid-cols-3">
-        <Kpi label="A cobrar" value={formatMoney(receivable, cur)} href="/app/clientes" />
-        <Kpi label="A pagar" value={formatMoney(payable, cur)} href="/app/proveedores" />
+        <Kpi
+          label="A cobrar · Blanco"
+          value={formatMoney(totals.blanco.receivable, cur)}
+          detail={totals.gestion.receivable ? `Gestión: ${formatMoney(totals.gestion.receivable, cur)}` : undefined}
+          href="/app/cuentas?cuenta=blanco"
+        />
+        <Kpi
+          label="A pagar · Blanco"
+          value={formatMoney(totals.blanco.payable, cur)}
+          detail={totals.gestion.payable ? `Gestión: ${formatMoney(totals.gestion.payable, cur)}` : undefined}
+          href="/app/cuentas?cuenta=blanco"
+        />
         <Kpi label={`Cheques en cartera (${cheques.length})`} value={formatMoney(chequesTotal, cur)} href="/app/cheques" />
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Pizarra Rosario</CardTitle>
+            <CardTitle>Negocios hechos en Marketplace</CardTitle>
           </CardHeader>
-          <CardContent>
-            <ul className="divide-y">
-              {crops.map((c) => {
-                const q = board.quotes.find((x) => x.key === `rosario:${c}`);
-                return (
-                  <li key={c} className="flex items-center justify-between py-3">
-                    <span className="font-medium">{CROPS[c].name}</span>
-                    <span className="tabular">
-                      {q ? `$ ${formatNumber(q.price, 0)} · USD ${formatNumber(q.usdPerTon ?? 0, 0)}` : "—"} {q ? <Change pct={q.changePct} direction={q.direction} /> : null}
+          <CardContent className="space-y-4">
+            {deals.rows.length ? (
+              <ul className="divide-y">
+                {deals.rows.slice(0, 4).map((d) => (
+                  <li key={d.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                    <span className="min-w-0 truncate">
+                      <span className="font-medium">{d.title}</span>
+                      <span className="block text-xs text-muted-foreground">{d.role === "venta" ? "Venta" : "Compra"}</span>
                     </span>
+                    <span className="tabular">{d.amount != null ? formatMoney(d.amount, d.currency) : "—"}</span>
                   </li>
-                );
-              })}
-            </ul>
-            <PriceFreshness updatedAt={board.updatedAt} refreshMinutes={board.refreshMinutes} className="mt-3" />
-            <Button asChild variant="link" className="px-0">
-              <Link href="/precios">Ver todos los mercados</Link>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-muted-foreground">Todavía no cerraste negocios en el Marketplace.</p>
+            )}
+            <Button asChild size="lg" className="w-full sm:w-auto">
+              <Link href="/app/negocios">
+                <Handshake /> Ver negocios hechos en Marketplace
+              </Link>
             </Button>
           </CardContent>
         </Card>
@@ -94,11 +114,12 @@ export default async function DashboardPage() {
   );
 }
 
-function Kpi({ label, value, href }: { label: string; value: string; href: string }) {
+function Kpi({ label, value, href, detail }: { label: string; value: string; href: string; detail?: string }) {
   return (
     <Link href={href} className="rounded-xl border bg-card p-4 hover:border-primary">
       <p className="text-sm text-muted-foreground">{label}</p>
       <p className="text-2xl font-bold tabular">{value}</p>
+      {detail ? <p className="text-xs tabular text-muted-foreground">{detail}</p> : null}
     </Link>
   );
 }

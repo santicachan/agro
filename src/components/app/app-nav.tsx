@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Banknote, BookOpen, FileText, House, Lock, Repeat, Settings, Sparkles, Store, Truck, Users } from "lucide-react";
+import { Banknote, BookOpen, FileText, Handshake, House, Lock, Repeat, Scale, Settings, Sparkles, Store, Truck, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const APP_NAV = [
@@ -11,9 +11,11 @@ export const APP_NAV = [
   { href: "/app/comprobantes", label: "Comprobantes", icon: FileText },
   { href: "/app/cheques", label: "Cheques", icon: Banknote },
   { href: "/app/proveedores", label: "Proveedores", icon: Truck },
+  { href: "/app/cuentas", label: "Cuentas corrientes", icon: Scale },
   { href: "/app/canjes", label: "Canjes", icon: Repeat },
   { href: "/app/libros", label: "Libros contables", icon: BookOpen },
   { href: "/app/publicaciones", label: "Marketplace", icon: Store },
+  { href: "/app/negocios", label: "Negocios hechos", icon: Handshake },
   { href: "/app/configuracion", label: "Configuración", icon: Settings },
 ];
 
@@ -21,6 +23,7 @@ export const APP_NAV = [
 export const FREE_NAV = [
   { href: "/app/mejorar", label: "CRM", icon: Lock },
   { href: "/app/publicaciones", label: "Marketplace", icon: Store },
+  { href: "/app/negocios", label: "Negocios hechos", icon: Handshake },
   { href: "/app/plan", label: "Mi plan", icon: Sparkles },
 ];
 
@@ -55,7 +58,7 @@ export function SideNav({ crm }: { crm: boolean }) {
 /** Thumb-reachable bottom bar on phones: the 4 most used sections. */
 export function BottomNav({ crm }: { crm: boolean }) {
   const pathname = usePathname();
-  const items = crm ? APP_NAV.slice(0, 4) : FREE_NAV;
+  const items = crm ? APP_NAV.slice(0, 4) : FREE_NAV.filter((i) => i.href !== "/app/negocios");
   return (
     <nav
       className={cn("fixed inset-x-0 bottom-0 z-40 grid border-t bg-background pb-[env(safe-area-inset-bottom)] lg:hidden", items.length === 4 ? "grid-cols-4" : "grid-cols-3")}

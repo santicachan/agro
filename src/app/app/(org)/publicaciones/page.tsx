@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Plus, ShieldCheck } from "lucide-react";
+import { Handshake, Plus, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, Badge, EmptyState, PageHeader } from "@/components/ui/misc";
@@ -30,11 +30,18 @@ export default async function MyListingsPage({ searchParams }: { searchParams: P
         title="Mis publicaciones"
         description={`${active} de ${plan.maxListings ?? "∞"} publicaciones · comisión por venta ${plan.commissionPct}%`}
         actions={
-          <Button asChild size="lg">
-            <Link href="/app/publicaciones/nueva">
-              <Plus /> Publicar
-            </Link>
-          </Button>
+          <>
+            <Button asChild size="lg" variant="outline">
+              <Link href="/app/negocios">
+                <Handshake /> Negocios hechos en Marketplace
+              </Link>
+            </Button>
+            <Button asChild size="lg">
+              <Link href="/app/publicaciones/nueva">
+                <Plus /> Publicar
+              </Link>
+            </Button>
+          </>
         }
       />
       {sp.error ? <Alert tone="error" className="mb-4">{sp.error}</Alert> : null}
