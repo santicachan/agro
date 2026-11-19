@@ -8,11 +8,13 @@ import { DocBadges } from "@/components/crm/doc-badges";
 import { LedgerBadge } from "@/components/crm/ledger-tabs";
 import { PrintButton } from "@/components/crm/print-button";
 import { requireCrm } from "@/lib/auth";
-import { authorizeWithArca, invoiceFromRemito, remitoFromInvoice } from "@/lib/crm/actions";
+import { authorizeWithArca, invoiceFromRemito, remitoFromInvoice, settleFxDifference } from "@/lib/crm/actions";
+import { fxSettlement } from "@/lib/crm/fx-settlement";
+import { officialRate } from "@/lib/fx/official";
 import { isArcaConfigured } from "@/lib/crm/arca";
 import { DOC_TYPES, TAX_CONDITIONS, documentLabel, formatDocNumber, type DocType } from "@/lib/crm/documents";
 import { PAYMENT_METHOD_LABEL, type PaymentMethod } from "@/lib/crm/payloads";
-import { balancesFor, type DocumentRow } from "@/lib/crm/queries";
+import { balancesFor, usdSettlementInfo, type DocumentRow } from "@/lib/crm/queries";
 import { formatDate, formatMoney, formatNumber } from "@/lib/format";
 
 export const metadata = { title: "Comprobante" };
@@ -26,7 +28,7 @@ export default async function DocumentPage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ error?: string; arca?: string; arca_errors?: string; cheque?: string }>;
+  searchParams: Promise<{ error?: string; arca?: string; arca_errors?: string; cheque?: string; liquidado?: string }>;
 }) {
   const [{ id }, sp] = await Promise.all([params, searchParams]);
   const ctx = await requireCrm();
@@ -39,7 +41,7 @@ export default async function DocumentPage({
   if (!data) notFound();
   const doc = data as DocumentRow & {
     document_lines: { id: string; description: string; quantity: number; unit: string; unit_price: number; vat_rate: number; net: number; vat: number }[];
-    payment_items: { id: string; method: string; amount: number; reference: string | null; cheques: { id: string; bank: string; number: string; payment_date: string; status: string } | null }[];
+    payment_items: { id: string; method: string; amount: number; reference: string | null; currency: string | null; fx_rate: number | null; amount_currency: number | null; cheques: { id: string; bank: string; number: string; payment_date: string; status: string } | null }[];
   };
 
   const [source, derived, cancelledBy, cancels, balances] = await Promise.all([
@@ -69,8 +71,41 @@ export default async function DocumentPage({
   const canAuthorize = fiscal && !authorized && ["owner", "admin"].includes(ctx.role);
   const arca = doc.arca_response ?? null;
   const arcaErrors: string[] = sp.arca_errors ? (JSON.parse(sp.arca_errors) as string[]) : [];
-  const fx = (doc.meta ?? {}) as { invoiceFx?: number; paymentFx?: number; appliedForeign?: number; invoiceCurrency?: string; bank?: string; number?: string; fee?: number };
+  const fx = (doc.meta ?? {}) as {
+    invoiceFx?: number;
+    paymentFx?: number;
+    appliedForeign?: number;
+    invoiceCurrency?: string;
+    bank?: string;
+    number?: string;
+    fee?: number;
+    mode?: string;
+    usdPending?: number;
+    paidCurrency?: string;
+    paidAmount?: number;
+  };
   const cur = ctx.org.base_currency;
+  const bcraRate = Number(doc.bcra_rate) > 0 ? Number(doc.bcra_rate) : null;
+
+  // Peso invoice priced in dollars: dollars cancelled, dollars pending and the
+  // difference a settlement today would generate (preview).
+  const settleable = ["factura_venta", "nota_debito_venta", "factura_compra", "nota_debito_compra"].includes(doc.type) && doc.currency === cur && doc.concept == null;
+  const usdInfo = settleable ? (await usdSettlementInfo(ctx, [id])).get(id) : undefined;
+  const todayRate = settleable && usdInfo?.usd_rate ? await officialRate(ctx.supabase, new Date().toISOString().slice(0, 10)) : null;
+  const settlement =
+    settleable && usdInfo?.usd_rate && todayRate
+      ? fxSettlement({
+          side: meta.side === "venta" ? "venta" : "compra",
+          totalArs: Number(doc.total),
+          pendingArs: pending ?? 0,
+          invoiceRate: usdInfo.usd_rate,
+          usdPaid: usdInfo.usd_paid,
+          paymentRate: todayRate.rate,
+          vatBases: Object.entries(
+            doc.document_lines.reduce<Record<string, number>>((acc, l) => ({ ...acc, [String(Number(l.vat_rate))]: (acc[String(Number(l.vat_rate))] ?? 0) + Number(l.net) }), {}),
+          ).map(([rate, b]) => ({ rate: Number(rate), base: b })),
+        })
+      : null;
   const hasInvoice = derived.some((d) => d.type === "factura_venta");
   const hasRemito = derived.some((d) => d.type === "remito") || source?.type === "remito";
   const noteSide = meta.side === "venta" ? "venta" : "compra";
@@ -85,6 +120,7 @@ export default async function DocumentPage({
 
       {sp.error ? <Alert tone="error" className="mb-4">{sp.error}</Alert> : null}
       {sp.cheque === "rechazado" ? <Alert className="mb-4">Cheque rechazado: generamos esta nota de débito automáticamente y ya impacta en la cuenta corriente.</Alert> : null}
+      {sp.liquidado ? <Alert className="mb-4">Diferencia de cambio liquidada: emitimos la nota y la imputamos a este comprobante.</Alert> : null}
       {sp.cheque === "nota" ? <Alert className="mb-4">Nota generada por el cheque rechazado. Ya impacta en la cuenta corriente.</Alert> : null}
       {gestion ? (
         <Alert tone="warning" className="mb-4">
@@ -165,7 +201,15 @@ export default async function DocumentPage({
             </div>
           </CardHeader>
           <CardContent className="space-y-6">
-            {doc.concept === "diferencia_cambio" && fx.invoiceFx ? (
+            {doc.concept === "diferencia_cambio" && fx.mode === "liquidacion" ? (
+              <div className="flex items-start gap-3 rounded-lg bg-secondary p-3 text-sm">
+                <ArrowLeftRight className="mt-0.5 size-5 shrink-0" aria-hidden />
+                <p>
+                  Liquidación de la diferencia de cambio: la factura se pactó a TC {formatNumber(Number(fx.invoiceFx), 2)} y se saldó a TC {formatNumber(Number(fx.paymentFx), 2)}. El
+                  cliente {doc.type.startsWith("nota_debito") ? "debe más" : "debe menos"} pesos por la variación del tipo de cambio.
+                </p>
+              </div>
+            ) : doc.concept === "diferencia_cambio" && fx.invoiceFx ? (
               <div className="flex items-start gap-3 rounded-lg bg-secondary p-3 text-sm">
                 <ArrowLeftRight className="mt-0.5 size-5 shrink-0" aria-hidden />
                 <p>
@@ -220,6 +264,11 @@ export default async function DocumentPage({
                           </>
                         ) : null}
                         {p.reference ? ` — ${p.reference}` : ""}
+                        {p.currency && p.amount_currency != null ? (
+                          <span className="block text-xs text-muted-foreground">
+                            {formatMoney(Number(p.amount_currency), p.currency)} a TC {formatNumber(Number(p.fx_rate), 2)}
+                          </span>
+                        ) : null}
                       </span>
                       <span className="tabular">{formatMoney(Number(p.amount), doc.currency)}</span>
                     </li>
@@ -247,6 +296,17 @@ export default async function DocumentPage({
               ) : null}
               {pending != null && pending > 0 && !meta.payment ? <Row label="Saldo pendiente" value={formatMoney(pending, doc.currency)} /> : null}
             </div>
+            {bcraRate ? (
+              <div className="rounded-lg border p-3 text-sm">
+                <p className="font-semibold">Tipo de cambio oficial BCRA (Com. A 3500)</p>
+                <p className="tabular">
+                  {formatMoney(bcraRate, cur)} por USD
+                  {doc.bcra_rate_date ? ` · publicado el ${formatDate(`${doc.bcra_rate_date}T12:00:00`)}` : ""}
+                  {doc.bcra_rate_date && doc.bcra_rate_date !== doc.issue_date ? " (último hábil a la fecha de emisión)" : ""}
+                </p>
+                {doc.currency === cur ? <p className="text-xs text-muted-foreground">Equivale a {formatMoney(Number(doc.total) / bcraRate, "USD")} al día de emisión.</p> : null}
+              </div>
+            ) : null}
             {doc.notes ? <p className="text-sm text-muted-foreground">{doc.notes}</p> : null}
           </CardContent>
         </Card>
@@ -279,6 +339,50 @@ export default async function DocumentPage({
                   <p className="mt-3 text-xs text-muted-foreground">
                     El envío a ARCA se activa al cargar el certificado digital. <Link href="/app/configuracion" className="text-primary hover:underline">Ver configuración</Link>
                   </p>
+                ) : null}
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {settlement && usdInfo?.usd_rate ? (
+            <Card className="print:hidden">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <ArrowLeftRight className="size-5" aria-hidden /> Diferencia de cambio
+                </CardTitle>
+                <CardDescription>Factura en pesos pactada a TC {formatNumber(usdInfo.usd_rate, 2)}. Lo que no se cubre por la variación del dólar queda pendiente hasta saldarla.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-3 text-sm">
+                <dl className="grid grid-cols-2 gap-3">
+                  <Item label="Valor en dólares" value={formatMoney(settlement.usdValue, "USD")} />
+                  <Item label="Dólares cancelados" value={formatMoney(usdInfo.usd_paid, "USD")} />
+                  <Item label="Dólares pendientes" value={formatMoney(settlement.usdPending, "USD")} />
+                  <Item label="Pesos pendientes" value={formatMoney(pending ?? 0, cur)} />
+                </dl>
+                <div className="rounded-lg bg-secondary p-3">
+                  <p className="font-medium">Vista previa si se salda hoy (TC BCRA {formatNumber(todayRate!.rate, 2)})</p>
+                  <p className="tabular">Pesos para saldar: {formatMoney(settlement.arsToSettle, cur)}</p>
+                  {settlement.note ? (
+                    <p className="tabular">
+                      {settlement.difference > 0 ? "Nota de débito" : "Nota de crédito"} por diferencia de cambio: <strong>{formatMoney(settlement.note.total, cur)}</strong>
+                      {settlement.note.vat ? ` (IVA ${formatMoney(settlement.note.vat, cur)})` : ""}
+                    </p>
+                  ) : (
+                    <p>Sin diferencia de cambio.</p>
+                  )}
+                </div>
+                {settlement.usdPending > 0.01 && (pending ?? 0) > 0 ? (
+                  <Button asChild className="w-full">
+                    <Link href={`/app/comprobantes/nuevo?tipo=${meta.side === "venta" ? "recibo" : "orden_pago"}&party=${doc.party_id}&saldar=${doc.id}${cuentaQs}`}>
+                      {meta.side === "venta" ? "Cobrar y saldar" : "Pagar y saldar"}
+                    </Link>
+                  </Button>
+                ) : settlement.note && settlement.difference < 0 && (pending ?? 0) > 0 ? (
+                  <form action={settleFxDifference}>
+                    <input type="hidden" name="id" value={doc.id} />
+                    <input type="hidden" name="rate" value={todayRate!.rate} />
+                    <Button className="w-full">Emitir nota de crédito por {formatMoney(settlement.note.total, cur)}</Button>
+                  </form>
                 ) : null}
               </CardContent>
             </Card>

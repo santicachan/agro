@@ -5,21 +5,23 @@ import { requireCrm } from "@/lib/auth";
 import { DOC_TYPES, documentLabel, type DocType } from "@/lib/crm/documents";
 import { parseLedger } from "@/lib/crm/ledger";
 import { associableDocuments, chequesInPortfolio, listParties, openItems } from "@/lib/crm/queries";
-import { fetchFx } from "@/lib/prices/sources/fx";
+import { officialRate } from "@/lib/fx/official";
 
 export const metadata = { title: "Nuevo comprobante" };
 
-export default async function NewDocumentPage({ searchParams }: { searchParams: Promise<{ tipo?: string; party?: string; origen?: string; cuenta?: string }> }) {
+export default async function NewDocumentPage({ searchParams }: { searchParams: Promise<{ tipo?: string; party?: string; origen?: string; cuenta?: string; saldar?: string }> }) {
   const sp = await searchParams;
   const ledger = parseLedger(sp.cuenta);
   const gestion = ledger === "gestion";
   const type = (sp.tipo && sp.tipo in DOC_TYPES ? sp.tipo : "factura_venta") as DocType;
   const ctx = await requireCrm();
   const side = DOC_TYPES[type].side;
-  const [parties, fx] = await Promise.all([listParties(ctx, side === "venta" ? "customer" : "supplier"), fetchFx()]);
-  const pair = ctx.org.base_currency === "BRL" ? "USD/BRL" : "USD/ARS";
-  // BNA divisa vendedor is the usual reference for invoicing in USD.
-  const usdRate = fx.items.find((f) => f.pair === pair)?.sell ?? null;
+  const [parties, bcra] = await Promise.all([
+    listParties(ctx, side === "venta" ? "customer" : "supplier"),
+    ctx.org.base_currency === "ARS" ? officialRate(ctx.supabase, new Date().toISOString().slice(0, 10)) : Promise.resolve(null),
+  ]);
+  // Official BCRA rate (Com. A 3500); the forms refresh it when the date changes.
+  const usdRate = bcra?.rate ?? null;
   const partyOptions = parties.map((p) => ({ id: p.id, name: p.name }));
 
   if (type === "recibo" || type === "orden_pago") {
@@ -43,6 +45,7 @@ export default async function NewDocumentPage({ searchParams }: { searchParams: 
           portfolio={portfolio.map((c) => ({ ...c, amount: Number(c.amount) }))}
           baseCurrency={ctx.org.base_currency}
           usdRate={usdRate}
+          settleId={sp.saldar}
         />
       </>
     );

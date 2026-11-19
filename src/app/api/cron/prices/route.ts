@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getPriceBoard } from "@/lib/prices";
+import { BCRA_SOURCE, fetchBcraRates } from "@/lib/fx/bcra";
 import { createAdminClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -38,6 +39,15 @@ export async function GET(req: Request) {
   const { error: e2 } = await sb.from("fx_snapshots").upsert(
     board.fx.map((f) => ({ pair: f.pair, as_of: f.asOf.slice(0, 10), buy: f.buy, sell: f.sell, source: f.source })),
   );
-  const errors = [...board.errors.map((e) => `${e.source}: ${e.message}`), e1?.message, e2?.message].filter(Boolean);
-  return NextResponse.json({ saved: live.length, fx: board.fx.length, errors }, { status: errors.length && !live.length ? 502 : 200 });
+  // Official BCRA rate (Com. A 3500): store the last days and refine the rate of
+  // documents issued before the day's rate was published.
+  const today = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 15 * 864e5).toISOString().slice(0, 10);
+  const bcra = await fetchBcraRates(from, today);
+  const { error: e3 } = bcra.length
+    ? await sb.from("bcra_rates").upsert(bcra.map((r) => ({ date: r.date, rate: r.rate, source: BCRA_SOURCE, fetched_at: new Date().toISOString() })), { onConflict: "date" })
+    : { error: { message: "BCRA: sin datos" } };
+  const { data: refreshed, error: e4 } = await sb.rpc("refresh_document_bcra_rates");
+  const errors = [...board.errors.map((e) => `${e.source}: ${e.message}`), e1?.message, e2?.message, e3?.message, e4?.message].filter(Boolean);
+  return NextResponse.json({ saved: live.length, fx: board.fx.length, bcra: bcra.length, refreshed, errors }, { status: errors.length && !live.length ? 502 : 200 });
 }

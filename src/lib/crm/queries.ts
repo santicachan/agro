@@ -1,4 +1,5 @@
 import "server-only";
+import { usdCancelled } from "./fx-settlement";
 import type { OrgContext } from "@/lib/auth";
 import { CREDIT_TYPES, type DocType, type Letter, type TaxCondition } from "./documents";
 import { balancesByLedger, movementAmountIn, rateOn, type FxPoint, type Ledger, type ViewCurrency } from "./ledger";
@@ -41,6 +42,8 @@ export interface DocumentRow {
   meta: Record<string, unknown> | null;
   ledger: Ledger;
   usd_rate: number | null;
+  bcra_rate?: number | null;
+  bcra_rate_date?: string | null;
   arca_response: { status?: string; preparedAt?: string; error?: string } | null;
   parties?: { name: string; tax_id: string | null; tax_condition: TaxCondition | null } | null;
 }
@@ -180,7 +183,7 @@ export async function openItems(ctx: OrgContext, partyId: string, side: "venta" 
     .in("type", types)
     .gt("pending", 0)
     .order("issue_date");
-  return (data ?? []).map((r) => ({ ...r, pending: Number(r.pending), total: Number(r.total), vat: Number(r.vat), fx_rate: Number(r.fx_rate) })) as {
+  const rows = (data ?? []).map((r) => ({ ...r, pending: Number(r.pending), total: Number(r.total), vat: Number(r.vat), fx_rate: Number(r.fx_rate) })) as {
     id: string;
     type: DocType;
     letter: Letter | null;
@@ -193,6 +196,38 @@ export async function openItems(ctx: OrgContext, partyId: string, side: "venta" 
     vat: number;
     pending: number;
   }[];
+  const usd = await usdSettlementInfo(ctx, rows.map((r) => r.id));
+  return rows.map((r) => ({ ...r, usd_rate: usd.get(r.id)?.usd_rate ?? null, usd_paid: usd.get(r.id)?.usd_paid ?? 0 }));
+}
+
+/**
+ * Dollar side of peso invoices: the rate of the invoice day and the dollars
+ * already cancelled (pesos applied ÷ rate of each payment). Exchange-difference
+ * notes are adjustments, so they don't count as dollars paid.
+ */
+export async function usdSettlementInfo(ctx: OrgContext, ids: string[]) {
+  const out = new Map<string, { usd_rate: number | null; usd_paid: number }>();
+  if (!ids.length) return out;
+  const [{ data: docs }, { data: apps }] = await Promise.all([
+    ctx.supabase.from("documents").select("id, usd_rate, currency").in("id", ids).eq("org_id", ctx.org.id),
+    ctx.supabase
+      .from("applications")
+      .select("invoice_document_id, amount, payer:documents!applications_payment_document_id_fkey(usd_rate, concept)")
+      .in("invoice_document_id", ids)
+      .eq("org_id", ctx.org.id),
+  ]);
+  for (const d of docs ?? []) {
+    const rate = d.currency === ctx.org.base_currency && Number(d.usd_rate) > 0 ? Number(d.usd_rate) : null;
+    const mine = (apps ?? []).filter((a) => a.invoice_document_id === d.id) as unknown as { amount: number; payer: { usd_rate: number | null; concept: string | null } | null }[];
+    const paid = rate
+      ? usdCancelled(
+          mine.filter((a) => a.payer?.concept !== "diferencia_cambio").map((a) => ({ amount: Number(a.amount), paymentRate: a.payer?.usd_rate ? Number(a.payer.usd_rate) : null })),
+          rate,
+        )
+      : 0;
+    out.set(d.id as string, { usd_rate: rate, usd_paid: Math.round(paid * 100) / 100 });
+  }
+  return out;
 }
 
 export async function listDocuments(ctx: OrgContext, opts: { type?: string; partyId?: string; limit?: number; ledger?: Ledger } = {}) {

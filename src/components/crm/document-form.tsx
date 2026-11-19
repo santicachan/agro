@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/form";
 import { Alert } from "@/components/ui/misc";
-import { createDocument, type DocumentPayload } from "@/lib/crm/actions";
+import { createDocument, getOfficialRate, type DocumentPayload } from "@/lib/crm/actions";
 import { DOC_TYPES, computeTotals, documentLabel, formatDocNumber, type DocType } from "@/lib/crm/documents";
 import type { Ledger } from "@/lib/crm/ledger";
 import { LedgerSwitch } from "./ledger-switch";
@@ -73,6 +73,21 @@ export function DocumentForm({
   const [currency, setCurrency] = useState(initialSource?.currency ?? baseCurrency);
   const [fxRate, setFxRate] = useState(String(initialSource && initialSource.currency !== baseCurrency ? (usdRate ?? initialSource.fx_rate) : (usdRate ?? "")));
   const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const fxTouched = useRef(false);
+  const [fxSource, setFxSource] = useState<string | null>(null);
+  // Official BCRA rate (Com. A 3500) of the issue day.
+  useEffect(() => {
+    if (fxTouched.current || baseCurrency === "USD") return;
+    let alive = true;
+    getOfficialRate(issueDate).then((r) => {
+      if (!alive || fxTouched.current || !r) return;
+      setFxRate(String(r.rate));
+      setFxSource(`BCRA Com. A 3500 del ${new Date(`${r.date}T12:00:00`).toLocaleDateString("es-AR")}`);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [issueDate, baseCurrency]);
   const [dueDate, setDueDate] = useState("");
   const isPurchase = DOC_TYPES[type].side === "compra";
   const [supplierPos, setSupplierPos] = useState("");
@@ -189,9 +204,20 @@ export function DocumentForm({
             <Field
               label={`Tipo de cambio (${baseCurrency} por USD)`}
               htmlFor="fx"
-              hint={currency !== baseCurrency ? "Por defecto, dólar mayorista del día." : "Referencia para ver la cuenta corriente en dólares."}
+              hint={`${fxSource ? `Oficial ${fxSource}.` : "Tipo de cambio oficial del BCRA del día de emisión."} Queda registrado en el comprobante.`}
             >
-              <Input id="fx" type="number" inputMode="decimal" step="any" value={fxRate} onChange={(e) => setFxRate(e.target.value)} />
+              <Input
+                id="fx"
+                type="number"
+                inputMode="decimal"
+                step="any"
+                value={fxRate}
+                onChange={(e) => {
+                  fxTouched.current = true;
+                  setFxSource(null);
+                  setFxRate(e.target.value);
+                }}
+              />
             </Field>
           ) : null}
         </CardContent>

@@ -1,17 +1,18 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, Input, Select, Textarea } from "@/components/ui/form";
 import { Alert, Badge } from "@/components/ui/misc";
-import { createPayment, type PaymentPayload } from "@/lib/crm/actions";
+import { createPayment, getOfficialRate, type PaymentPayload } from "@/lib/crm/actions";
+import { fxSettlement } from "@/lib/crm/fx-settlement";
 import { DOC_TYPES, exchangeDifference, formatDocNumber, type DocType, type Letter } from "@/lib/crm/documents";
 import type { Ledger } from "@/lib/crm/ledger";
 import { PAYMENT_METHODS, PAYMENT_METHOD_LABEL, type PaymentMethod } from "@/lib/crm/payloads";
-import { formatDate, formatMoney } from "@/lib/format";
+import { formatDate, formatMoney, formatNumber } from "@/lib/format";
 import { LedgerSwitch } from "./ledger-switch";
 
 type Method = PaymentMethod;
@@ -45,6 +46,10 @@ interface OpenItem {
   total: number;
   pending: number;
   vat?: number;
+  /** Rate of the invoice day (peso invoices priced in dollars). */
+  usd_rate?: number | null;
+  /** Dollars already cancelled. */
+  usd_paid?: number | null;
 }
 
 const newItem = (): Item => ({ method: "transferencia", amount: "", reference: "", chequeId: "", bank: "", number: "", drawerName: "", paymentDate: "" });
@@ -58,6 +63,7 @@ export function PaymentForm({
   baseCurrency,
   usdRate,
   ledger = "blanco",
+  settleId,
 }: {
   type: "recibo" | "orden_pago";
   parties: { id: string; name: string }[];
@@ -67,35 +73,70 @@ export function PaymentForm({
   baseCurrency: string;
   usdRate: number | null;
   ledger?: Ledger;
+  /** Invoice to settle (preselected, from "Cobrar y saldar"). */
+  settleId?: string;
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [error, setError] = useState<string>();
   const [issueDate, setIssueDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [fxRate, setFxRate] = useState(String(usdRate ?? ""));
+  const fxTouched = useRef(false);
+  const [fxSource, setFxSource] = useState<string | null>(usdRate ? "BCRA" : null);
   const [currency, setCurrency] = useState(baseCurrency);
   const payInBase = currency === baseCurrency;
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<Item[]>([newItem()]);
-  const [applied, setApplied] = useState<Record<string, string>>({});
+  const [applied, setApplied] = useState<Record<string, string>>(() => {
+    const o = settleId ? openItems.find((x) => x.id === settleId) : undefined;
+    return o ? { [o.id]: String(o.pending) } : {};
+  });
+  const [settle, setSettle] = useState<Record<string, boolean>>(() => (settleId ? { [settleId]: true } : {}));
   const fx = Number(fxRate) || 1;
-  // A payment in USD cancels only USD documents; in pesos it cancels both.
-  const selectable = payInBase ? openItems : openItems.filter((o) => o.currency === currency);
 
+  // Official BCRA rate of the payment day (unless typed by hand).
+  useEffect(() => {
+    if (fxTouched.current || baseCurrency === "USD") return;
+    let alive = true;
+    getOfficialRate(issueDate).then((r) => {
+      if (!alive || fxTouched.current || !r) return;
+      setFxRate(String(r.rate));
+      setFxSource(`BCRA Com. A 3500 del ${formatDate(`${r.date}T12:00:00`)}`);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [issueDate, baseCurrency]);
+
+  // Everything is cancelled in pesos: dollars are converted at the payment-day rate.
   const paid = items.reduce((s, i) => s + (Number(i.amount) || 0), 0);
-  const appliedRows = selectable
+  const paidBase = payInBase ? paid : Math.round(paid * fx * 100) / 100;
+  const appliedRows = openItems
     .filter((o) => applied[o.id] !== undefined)
     .map((o) => {
       const amount = Number(applied[o.id]) || 0;
-      const foreign = o.currency !== currency;
+      const foreign = o.currency !== baseCurrency;
+      if (!foreign && settle[o.id] && o.usd_rate) {
+        const s = fxSettlement({
+          side: type === "recibo" ? "venta" : "compra",
+          totalArs: o.total,
+          pendingArs: o.pending,
+          invoiceRate: o.usd_rate,
+          usdPaid: o.usd_paid ?? 0,
+          paymentRate: fx,
+          vatBases: [{ rate: 0, base: o.total }],
+        });
+        return { o, amount, base: s?.arsToSettle ?? 0, diff: null, settlement: s };
+      }
       const base = amount * (foreign ? fx : 1);
       const diff =
-        foreign && payInBase && o.type === "factura_venta"
+        foreign && o.type === "factura_venta"
           ? exchangeDifference({ foreignTotal: o.total, foreignVat: o.vat ?? 0, invoiceFx: o.fx_rate, paymentFx: fx, appliedFraction: Math.min(1, amount / o.total) })
           : null;
-      return { o, amount, base, diff };
+      return { o, amount, base, diff, settlement: null };
     });
   const appliedBase = appliedRows.reduce((s, r) => s + r.base, 0);
+  const onAccount = Math.round((paidBase - appliedBase) * 100) / 100;
   const updateItem = (i: number, patch: Partial<Item>) => setItems((xs) => xs.map((x, j) => (j === i ? { ...x, ...patch } : x)));
 
   function submit() {
@@ -104,7 +145,7 @@ export function PaymentForm({
       type,
       partyId: partyId ?? "",
       issueDate,
-      fxRate: fx,
+      fxRate: Number(fxRate) > 0 ? Number(fxRate) : undefined,
       currency: currency as PaymentPayload["currency"],
       ledger,
       notes: notes || undefined,
@@ -118,7 +159,9 @@ export function PaymentForm({
             ? { bank: i.bank, number: i.number, drawerName: i.drawerName || undefined, paymentDate: i.paymentDate }
             : undefined,
       })),
-      applications: appliedRows.filter((r) => r.amount > 0).map((r) => ({ invoiceId: r.o.id, amount: r.amount })),
+      applications: appliedRows
+        .filter((r) => r.settlement || r.amount > 0)
+        .map((r) => (r.settlement ? { invoiceId: r.o.id, amount: 0, settle: true } : { invoiceId: r.o.id, amount: r.amount })),
     };
     start(async () => {
       const res = await createPayment(payload);
@@ -150,15 +193,8 @@ export function PaymentForm({
             <Input id="date" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} />
           </Field>
           {baseCurrency !== "USD" ? (
-            <Field label="Moneda del pago" htmlFor="payCurrency" hint={payInBase ? undefined : "En dólares solo se cancelan comprobantes en dólares."}>
-              <Select
-                id="payCurrency"
-                value={currency}
-                onChange={(e) => {
-                  setCurrency(e.target.value);
-                  setApplied({});
-                }}
-              >
+            <Field label="Moneda del pago" htmlFor="payCurrency" hint={payInBase ? undefined : "Los dólares se pasan a pesos al tipo de cambio del día del pago y cancelan facturas en pesos."}>
+              <Select id="payCurrency" value={currency} onChange={(e) => setCurrency(e.target.value)}>
                 <option value={baseCurrency}>{baseCurrency === "ARS" ? "Pesos (ARS)" : baseCurrency}</option>
                 <option value="USD">Dólares (USD)</option>
               </Select>
@@ -168,9 +204,20 @@ export function PaymentForm({
             <Field
               label={`Tipo de cambio del pago (${baseCurrency}/USD)`}
               htmlFor="fx"
-              hint="Cancela comprobantes en dólares, calcula la diferencia de cambio y permite ver la cuenta en dólares."
+              hint={fxSource ? `Oficial ${fxSource}. Podés corregirlo.` : "Pesifica los dólares y calcula la diferencia de cambio."}
             >
-              <Input id="fx" type="number" inputMode="decimal" step="any" value={fxRate} onChange={(e) => setFxRate(e.target.value)} />
+              <Input
+                id="fx"
+                type="number"
+                inputMode="decimal"
+                step="any"
+                value={fxRate}
+                onChange={(e) => {
+                  fxTouched.current = true;
+                  setFxSource(null);
+                  setFxRate(e.target.value);
+                }}
+              />
             </Field>
           ) : null}
         </CardContent>
@@ -183,8 +230,8 @@ export function PaymentForm({
             <CardDescription>Marcá lo que se cancela con este {type === "recibo" ? "cobro" : "pago"}.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            {selectable.length === 0 ? <p className="text-muted-foreground">No hay comprobantes pendientes{payInBase ? "" : ` en ${currency}`}: quedará como pago a cuenta.</p> : null}
-            {selectable.map((o) => {
+            {openItems.length === 0 ? <p className="text-muted-foreground">No hay comprobantes pendientes: quedará como pago a cuenta.</p> : null}
+            {openItems.map((o) => {
               const checked = applied[o.id] !== undefined;
               const row = appliedRows.find((r) => r.o.id === o.id);
               return (
@@ -196,8 +243,10 @@ export function PaymentForm({
                     onChange={(e) =>
                       setApplied((a) => {
                         const next = { ...a };
-                        if (e.target.checked) next[o.id] = String(o.pending);
-                        else delete next[o.id];
+                        if (e.target.checked) {
+                          const free = Math.max(0, paidBase - appliedBase);
+                          next[o.id] = String(o.currency === baseCurrency && free > 0 ? Math.min(o.pending, Math.round(free * 100) / 100) : o.pending);
+                        } else delete next[o.id];
                         return next;
                       })
                     }
@@ -208,10 +257,44 @@ export function PaymentForm({
                     </p>
                     <p className="text-sm text-muted-foreground">
                       {formatDate(`${o.issue_date}T12:00:00`)} · pendiente {formatMoney(o.pending, o.currency)}
-                      {o.currency !== baseCurrency && payInBase ? ` (TC ${o.fx_rate})` : ""}
+                      {o.currency !== baseCurrency ? ` (TC ${o.fx_rate})` : ""}
+                      {o.currency === baseCurrency && o.usd_rate ? ` · USD ${formatNumber(Math.max(0, o.total / o.usd_rate - (o.usd_paid ?? 0)), 2)} pendientes (TC factura ${formatNumber(o.usd_rate, 2)})` : ""}
                     </p>
+                    {checked && o.currency === baseCurrency && o.usd_rate ? (
+                      <span
+                        role="checkbox"
+                        aria-checked={!!settle[o.id]}
+                        tabIndex={0}
+                        className="mt-1 flex cursor-pointer items-center gap-2 text-sm"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setSettle((x) => ({ ...x, [o.id]: !x[o.id] }));
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === " " || e.key === "Enter") {
+                            e.preventDefault();
+                            setSettle((x) => ({ ...x, [o.id]: !x[o.id] }));
+                          }
+                        }}
+                      >
+                        <input type="checkbox" tabIndex={-1} aria-hidden className="pointer-events-none size-5 accent-[var(--primary)]" checked={!!settle[o.id]} readOnly />
+                        Saldar con diferencia de cambio (ND/NC)
+                      </span>
+                    ) : null}
                   </div>
-                  {checked ? (
+                  {checked && row?.settlement ? (
+                    <div className="text-right text-sm tabular">
+                      <p>Cancela {formatMoney(row.settlement.arsToSettle, baseCurrency)}</p>
+                      {row.settlement.note ? (
+                        <Badge variant="accent">
+                          {row.settlement.difference > 0 ? "ND" : "NC"} dif. cambio {formatMoney(row.settlement.note.total, baseCurrency)}
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground">Sin diferencia</span>
+                      )}
+                    </div>
+                  ) : checked ? (
                     <Input
                       aria-label="Importe a cancelar"
                       className="w-40"
@@ -251,7 +334,11 @@ export function PaymentForm({
                     ))}
                   </Select>
                 </Field>
-                <Field label={`Importe (${currency})`} htmlFor={`a${i}`}>
+                <Field
+                  label={`Importe (${currency})`}
+                  htmlFor={`a${i}`}
+                  hint={!payInBase && Number(it.amount) > 0 ? `= ${formatMoney(Number(it.amount) * fx, baseCurrency)}` : undefined}
+                >
                   <Input id={`a${i}`} type="number" inputMode="decimal" step="any" value={it.amount} onChange={(e) => updateItem(i, { amount: e.target.value })} />
                 </Field>
                 <Field label="Referencia" htmlFor={`r${i}`}>
@@ -316,8 +403,13 @@ export function PaymentForm({
       <Card className="sticky bottom-20 lg:bottom-4">
         <CardContent className="flex flex-col gap-3 pt-5 sm:flex-row sm:items-center sm:justify-between">
           <div className="text-sm tabular">
-            <p>Cancelado: {formatMoney(appliedBase, currency)}</p>
-            <p className="text-2xl font-bold">{formatMoney(paid, currency)}</p>
+            <p>Cancelado: {formatMoney(appliedBase, baseCurrency)}</p>
+            {onAccount > 0.009 ? <p className="text-muted-foreground">Queda a cuenta: {formatMoney(onAccount, baseCurrency)}</p> : null}
+            {onAccount < -0.009 ? <p className="text-destructive">Falta cubrir: {formatMoney(-onAccount, baseCurrency)}</p> : null}
+            <p className="text-2xl font-bold">
+              {formatMoney(paid, currency)}
+              {!payInBase ? <span className="ml-2 text-base font-normal text-muted-foreground">= {formatMoney(paidBase, baseCurrency)}</span> : null}
+            </p>
           </div>
           <Button size="lg" onClick={submit} disabled={pending || !partyId || paid <= 0}>
             {pending ? "Guardando…" : type === "recibo" ? "Emitir recibo" : "Emitir orden de pago"}

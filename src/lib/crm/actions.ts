@@ -8,7 +8,10 @@ import { friendlyDbError } from "@/lib/billing/plans";
 import { arcaPreflight, buildFECAERequest, getEInvoicingProvider, isArcaConfigured, type ArcaDocument } from "./arca";
 import { computeTotals, formatCuit, isValidCuit } from "./documents";
 import { chequeAdjustment } from "./cheque-adjustments";
+import { fxSettlement } from "./fx-settlement";
 import { PAYMENT_METHODS, buildDocumentRpc, buildPaymentRpc, letterFor } from "./payloads";
+import { usdSettlementInfo } from "./queries";
+import { officialRate } from "@/lib/fx/official";
 
 export interface ActionState {
   error?: string;
@@ -102,9 +105,12 @@ export async function createDocument(payload: DocumentPayload): Promise<ActionSt
     }
   }
 
+  // Official BCRA rate (Com. A 3500) of the issue day, stored on every document.
+  const bcra = await officialRate(supabase, d.issueDate);
   const { data: id, error } = await supabase.rpc(
     "create_document",
     buildDocumentRpc(org, party, {
+      bcra,
       type: d.type,
       issueDate: d.issueDate,
       dueDate: d.dueDate,
@@ -144,7 +150,6 @@ async function copyDocument(sourceId: string, from: "remito" | "factura_venta", 
     pointOfSale: src.point_of_sale,
     sourceDocumentId: src.id,
     ledger: src.ledger === "gestion" ? "gestion" : "blanco",
-    usdRate: Number(src.usd_rate) > 0 ? Number(src.usd_rate) : undefined,
     notes: src.notes ?? undefined,
     lines: rowsToLines(src.document_lines as LineRow[]),
   });
@@ -252,7 +257,8 @@ const paymentSchema = z.object({
   type: z.enum(["recibo", "orden_pago"]),
   partyId: z.uuid("Elegí un cliente o proveedor"),
   issueDate: trimmed.regex(/^\d{4}-\d{2}-\d{2}$/),
-  fxRate: z.coerce.number().positive().default(1),
+  /** Pesos per USD on the payment day; defaults to the official BCRA rate. */
+  fxRate: z.coerce.number().positive().optional(),
   currency: z.enum(["ARS", "USD", "BRL"]).optional(),
   ledger: z.enum(["blanco", "gestion"]).default("blanco"),
   notes: optional,
@@ -275,7 +281,10 @@ const paymentSchema = z.object({
       }),
     )
     .min(1, "Agregá al menos un medio de pago"),
-  applications: z.array(z.object({ invoiceId: z.uuid(), amount: z.coerce.number().positive() })).default([]),
+  applications: z
+    .array(z.object({ invoiceId: z.uuid(), amount: z.coerce.number().nonnegative(), settle: z.boolean().optional() }))
+    .default([])
+    .refine((xs) => xs.every((a) => a.settle || a.amount > 0), "Indicá el importe a cancelar"),
   /** Generate ND/NC for exchange differences on foreign-currency invoices. */
   autoFxNotes: z.boolean().default(true),
 });
@@ -283,7 +292,8 @@ const paymentSchema = z.object({
 export type PaymentPayload = z.input<typeof paymentSchema>;
 
 export async function createPayment(payload: PaymentPayload): Promise<ActionState & { id?: string }> {
-  const { supabase, org } = await requireCrm();
+  const ctx = await requireCrm();
+  const { supabase, org } = ctx;
   const parsed = paymentSchema.safeParse(payload);
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const p = parsed.data;
@@ -297,17 +307,35 @@ export async function createPayment(payload: PaymentPayload): Promise<ActionStat
   const { data: invoices } = ids.length
     ? await supabase.from("documents").select("id, type, letter, point_of_sale, number, currency, fx_rate, total, party_id, ledger, document_lines(vat_rate, net)").in("id", ids).eq("org_id", org.id)
     : { data: [] as never[] };
+  const [{ data: balances }, usdInfo] = await Promise.all([
+    ids.length ? supabase.from("document_balances").select("id, pending").in("id", ids) : Promise.resolve({ data: [] as { id: string; pending: number }[] }),
+    usdSettlementInfo(ctx, ids),
+  ]);
   if (p.applications.some((a) => !invoices?.some((i) => i.id === a.invoiceId && i.party_id === p.partyId))) return { error: "Comprobante a cancelar inexistente" };
   if (invoices?.some((i) => (i.ledger ?? "blanco") !== p.ledger)) return { error: "Solo se pueden cancelar comprobantes de la misma cuenta (Blanco / Gestión)" };
   if (p.currency && p.currency !== org.base_currency && p.currency !== "USD") return { error: "Moneda no admitida" };
+  let fxRate = p.fxRate;
+  if (!fxRate) fxRate = (await officialRate(supabase, p.issueDate))?.rate;
+  if (!fxRate) {
+    if (p.currency === "USD" || p.applications.some((a) => a.settle)) return { error: "No pudimos obtener el tipo de cambio del BCRA: ingresalo a mano" };
+    fxRate = 1;
+  }
 
   let args;
   try {
     args = buildPaymentRpc(
       org,
       party,
-      p,
-      (invoices ?? []).map((i) => ({ ...i, fx_rate: Number(i.fx_rate), total: Number(i.total), lines: (i.document_lines ?? []).map((l: { vat_rate: number; net: number }) => ({ vat_rate: Number(l.vat_rate), net: Number(l.net) })) })),
+      { ...p, fxRate },
+      (invoices ?? []).map((i) => ({
+        ...i,
+        fx_rate: Number(i.fx_rate),
+        total: Number(i.total),
+        lines: (i.document_lines ?? []).map((l: { vat_rate: number; net: number }) => ({ vat_rate: Number(l.vat_rate), net: Number(l.net) })),
+        pending: Number(balances?.find((b) => b.id === i.id)?.pending ?? i.total),
+        usd_rate: usdInfo.get(i.id)?.usd_rate ?? null,
+        usd_paid: usdInfo.get(i.id)?.usd_paid ?? 0,
+      })),
     );
   } catch (e) {
     return { error: (e as Error).message };
@@ -528,4 +556,88 @@ export async function registerSwapDelivery(formData: FormData) {
     .update({ delivered_tons: delivered, status: delivered >= Number(swap.tons) ? "cumplido" : "parcial" })
     .eq("id", id);
   revalidatePath("/app/canjes");
+}
+
+// ─────────────────────────────────────────────── Tipo de cambio oficial y liquidación
+/** Official BCRA rate (Com. A 3500) of a day, for the forms. */
+export async function getOfficialRate(date: string): Promise<{ date: string; rate: number } | null> {
+  const { supabase } = await requireCrm();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  return officialRate(supabase, date);
+}
+
+/**
+ * Settles the exchange difference of a peso invoice whose dollar value is already
+ * fully cancelled but still shows pesos pending: issues the Nota de crédito (or
+ * de débito) for that differential and applies it to the invoice.
+ */
+export async function settleFxDifference(formData: FormData) {
+  const ctx = await requireCrm();
+  const { supabase, org } = ctx;
+  const id = String(formData.get("id"));
+  const back = (q: string) => redirect(`/app/comprobantes/${id}?${q}`);
+  const { data: inv } = await supabase
+    .from("documents")
+    .select("id, type, letter, point_of_sale, number, currency, total, party_id, ledger, document_lines(vat_rate, net)")
+    .eq("id", id)
+    .eq("org_id", org.id)
+    .single();
+  if (!inv || inv.currency !== org.base_currency || !["factura_venta", "factura_compra", "nota_debito_venta", "nota_debito_compra"].includes(inv.type)) back("error=" + encodeURIComponent("Solo se liquidan facturas en pesos"));
+  const [{ data: bal }, info, { data: party }] = await Promise.all([
+    supabase.from("document_balances").select("pending").eq("id", id).single(),
+    usdSettlementInfo(ctx, [id]),
+    supabase.from("parties").select("id, tax_condition").eq("id", inv!.party_id).single(),
+  ]);
+  const today = new Date().toISOString().slice(0, 10);
+  const rate = Number(formData.get("rate")) || (await officialRate(supabase, today))?.rate;
+  const byRate = new Map<number, number>();
+  for (const l of (inv!.document_lines ?? []) as { vat_rate: number; net: number }[]) byRate.set(Number(l.vat_rate), (byRate.get(Number(l.vat_rate)) ?? 0) + Number(l.net));
+  const side = inv!.type.endsWith("venta") ? "venta" : "compra";
+  const s = rate
+    ? fxSettlement({
+        side,
+        totalArs: Number(inv!.total),
+        pendingArs: Number(bal?.pending ?? 0),
+        invoiceRate: Number(info.get(id)?.usd_rate),
+        usdPaid: Number(info.get(id)?.usd_paid ?? 0),
+        paymentRate: rate,
+        vatBases: [...byRate].map(([r, b]) => ({ rate: r, base: b })),
+      })
+    : null;
+  if (!s || !party) back("error=" + encodeURIComponent("Falta el tipo de cambio para liquidar la diferencia"));
+  if (s!.usdPending > 0.01) back("error=" + encodeURIComponent(`Quedan USD ${s!.usdPending} por cancelar: registralos con un cobro/pago marcando “Saldar con diferencia de cambio”.`));
+  if (!s!.note || s!.difference >= 0) back("error=" + encodeURIComponent("No hay diferencia de cambio para liquidar"));
+  const note = s!.note!;
+  const label = `${inv!.letter ?? ""} ${String(inv!.point_of_sale).padStart(5, "0")}-${String(inv!.number).padStart(8, "0")}`.trim();
+  const ledger = inv!.ledger === "gestion" ? "gestion" : "blanco";
+  const { error } = await supabase.rpc("create_document", {
+    p_doc: {
+      org_id: org.id,
+      party_id: inv!.party_id,
+      type: note.type,
+      ledger,
+      letter: letterFor(note.type, org, party!, ledger),
+      point_of_sale: side === "venta" ? inv!.point_of_sale : 1,
+      issue_date: today,
+      currency: org.base_currency,
+      fx_rate: 1,
+      usd_rate: rate,
+      net: note.net,
+      vat: note.vat,
+      total: note.total,
+      status: "issued",
+      source_document_id: id,
+      concept: "diferencia_cambio",
+      meta: { mode: "liquidacion", invoiceFx: info.get(id)?.usd_rate, paymentFx: rate, pendingArs: Number(bal?.pending ?? 0) },
+      notes: `Diferencia de cambio s/ ${label}: saldo en pesos sin deuda en dólares`,
+    },
+    p_lines: note.lines.map((l) => ({ description: `Diferencia de cambio s/ ${label} (IVA ${l.rate}%)`, quantity: 1, unit: "u", unit_price: l.net, vat_rate: l.rate, net: l.net, vat: l.vat })),
+    p_payments: [],
+    p_applications: [{ invoice_document_id: id, amount: note.total, fx_rate: 1 }],
+    p_fx_notes: [],
+  });
+  if (error) back("error=" + encodeURIComponent(friendlyDbError(error.message)));
+  revalidatePath("/app/comprobantes");
+  revalidatePath("/app/cuentas");
+  back("liquidado=1");
 }

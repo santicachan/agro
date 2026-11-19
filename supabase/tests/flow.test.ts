@@ -192,7 +192,7 @@ describe("flujo comercial completo", () => {
     expect(ledgers.map((r) => r.ledger)).toEqual(["blanco", "gestion"]);
   });
 
-  it("cobro en dólares de una factura en dólares", async () => {
+  it("cobro en dólares de una factura en dólares: se pesifica al TC del día", async () => {
     const fv = await rpc(buildDocumentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
       type: "factura_venta", issueDate: "2026-11-27", currency: "USD", fxRate: 1500, lines: [{ description: "Semilla", quantity: 1, unitPrice: 1000, vatRate: 10.5 }],
     }));
@@ -200,9 +200,73 @@ describe("flujo comercial completo", () => {
     const receipt = await rpc(buildPaymentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
       type: "recibo", issueDate: "2026-11-29", fxRate: 1520, currency: "USD", items: [{ method: "transferencia", amount: 1105 }], applications: [{ invoiceId: fv, amount: 1105 }],
     }, [inv]));
-    expect((await q(`select currency from documents where id = $1`, [receipt]))[0].currency).toBe("USD");
+    expect((await q(`select currency, total, usd_rate from documents where id = $1`, [receipt]))[0]).toMatchObject({ currency: "ARS", total: "1679600.00", usd_rate: "1520.000000" });
+    expect((await q(`select currency, amount, amount_currency, fx_rate from payment_items where document_id = $1`, [receipt]))[0]).toMatchObject({ currency: "USD", amount: "1679600.00", amount_currency: "1105.00" });
     expect(await pending(fv)).toBe(0);
     expect(await pending(receipt)).toBe(0);
+  });
+
+  it("factura en pesos guarda el TC oficial BCRA del día de emisión", async () => {
+    await db.exec(`reset role; insert into bcra_rates(date, rate) values ('2026-12-01', 1600), ('2026-12-04', 1650) on conflict (date) do update set rate = excluded.rate; set role authenticated;`);
+    const fv = await rpc(buildDocumentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "factura_venta", issueDate: "2026-12-02", currency: "ARS", fxRate: 1, lines: [{ description: "Flete", quantity: 1, unitPrice: 100000, vatRate: 21 }],
+    }));
+    expect((await q(`select bcra_rate, bcra_rate_date::text d, usd_rate from documents where id = $1`, [fv]))[0]).toMatchObject({ bcra_rate: "1600.000000", d: "2026-12-01", usd_rate: "1600.000000" });
+  });
+
+  it("el TC BCRA se completa también en comprobantes con CAE (y nada más cambia)", async () => {
+    await db.exec(`reset role; insert into bcra_rates(date, rate) values ('2026-10-30', 1490) on conflict do nothing;`);
+    const [inv] = await q<{ id: string }>(`select id from documents where status = 'authorized' limit 1`);
+    await db.exec(`select refresh_document_bcra_rates(); set role authenticated;`);
+    const [d] = await q<{ bcra_rate: string | null }>(`select bcra_rate from documents where id = $1`, [inv.id]);
+    expect(Number(d.bcra_rate)).toBeGreaterThan(0);
+    await expect(q(`update documents set notes = 'x', bcra_rate = 1 where id = $1`, [inv.id])).rejects.toThrow(/LOCKED/);
+  });
+
+  it("pago parcial en USD deja la diferencia pendiente; al saldar se emite ND o NC", async () => {
+    const p2 = (await q<{ id: string }>(`insert into parties(org_id,kind,name,tax_condition) values ($1,'customer','Don Pedro','RI') returning id`, [org]))[0].id;
+    const party = { id: p2, tax_condition: "RI" as const };
+    // $1.210.000 at 1.000 = USD 1.210
+    const fv = await rpc(buildDocumentRpc(ORG(), party, {
+      type: "factura_venta", issueDate: "2026-12-05", currency: "ARS", fxRate: 1, usdRate: 1000, lines: [{ description: "Glifosato", quantity: 1, unitPrice: 1_000_000, vatRate: 21 }],
+    }));
+    const base: InvoiceForPayment = { id: fv, type: "factura_venta", letter: "A", point_of_sale: 1, number: 20, currency: "ARS", fx_rate: 1, total: 1_210_000, lines: [{ vat_rate: 21, net: 1_000_000 }], usd_rate: 1000 };
+    // USD 500 at 1.100 → $550.000 applied; the rest stays pending in pesos.
+    await rpc(buildPaymentRpc(ORG(), party, {
+      type: "recibo", issueDate: "2026-12-06", fxRate: 1100, currency: "USD", items: [{ method: "efectivo", amount: 500 }], applications: [{ invoiceId: fv, amount: 550_000 }],
+    }, [base]));
+    expect(await pending(fv)).toBe(660_000);
+    // Settle the remaining USD 710 at 1.200 = $852.000 → ND $192.000.
+    const r2 = await rpc(buildPaymentRpc(ORG(), party, {
+      type: "recibo", issueDate: "2026-12-07", fxRate: 1200, currency: "USD", items: [{ method: "transferencia", amount: 710 }], applications: [{ invoiceId: fv, amount: 0, settle: true }],
+    }, [{ ...base, pending: 660_000, usd_paid: 500 }]));
+    const [nd] = await q<{ id: string; type: string; total: string }>(`select id, type, total from documents where source_document_id = $1 and concept = 'diferencia_cambio'`, [fv]);
+    expect(nd).toMatchObject({ type: "nota_debito_venta", total: "192000.00" });
+    expect(await pending(fv)).toBe(0);
+    expect(await pending(nd.id)).toBe(0);
+    expect(await pending(r2)).toBe(0);
+    expect(await balance(p2)).toBe(0);
+
+    // Peso got stronger → NC.
+    const fv2 = await rpc(buildDocumentRpc(ORG(), party, {
+      type: "factura_venta", issueDate: "2026-12-08", currency: "ARS", fxRate: 1, usdRate: 1000, lines: [{ description: "Semilla", quantity: 1, unitPrice: 100_000, vatRate: 21 }],
+    }));
+    const r3 = await rpc(buildPaymentRpc(ORG(), party, {
+      type: "recibo", issueDate: "2026-12-09", fxRate: 900, items: [{ method: "transferencia", amount: 108_900 }], applications: [{ invoiceId: fv2, amount: 0, settle: true }],
+    }, [{ ...base, id: fv2, total: 121_000, lines: [{ vat_rate: 21, net: 100_000 }], pending: 121_000, usd_paid: 0 }]));
+    const [nc] = await q<{ type: string; total: string }>(`select type, total from documents where source_document_id = $1 and concept = 'diferencia_cambio'`, [fv2]);
+    expect(nc).toMatchObject({ type: "nota_credito_venta", total: "12100.00" });
+    expect(await pending(fv2)).toBe(0);
+    expect(await pending(r3)).toBe(0);
+    expect(await balance(p2)).toBe(0);
+  });
+
+  it("cheque en dólares dentro de un cobro pesificado", async () => {
+    const receipt = await rpc(buildPaymentRpc(ORG(), { id: customer, tax_condition: "RI" }, {
+      type: "recibo", issueDate: "2026-12-10", fxRate: 1500, currency: "USD", items: [{ method: "cheque", amount: 100, cheque: { bank: "Galicia", number: "U1", paymentDate: "2026-12-20" } }], applications: [],
+    }, []));
+    expect((await q(`select currency, amount from cheques where received_document_id = $1`, [receipt]))[0]).toMatchObject({ currency: "USD", amount: "100.00" });
+    expect((await q(`select total from documents where id = $1`, [receipt]))[0].total).toBe("150000.00");
   });
 
   it("canje con camioneta o insumos", async () => {
