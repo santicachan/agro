@@ -75,7 +75,7 @@ export function parseHistorico(json: Envelope<HistoricoData>): Record<string, Pr
 
 async function get<T>(path: string, fetchImpl: typeof fetch): Promise<Envelope<T>> {
   const res = await fetchImpl(`${GRANOSAR_API}${path}`, {
-    headers: { Accept: "application/json", "User-Agent": "CAMPAGROX/1.0 (+https://agrojc.vercel.app)" },
+    headers: { Accept: "application/json", "User-Agent": "CAMPAGROX/1.0 (+https://campagrox.vercel.app)" },
     next: { revalidate: PRICE_REFRESH_SECONDS },
   } as RequestInit);
   if (!res.ok) throw new Error(`granos.ar ${path} HTTP ${res.status}`);

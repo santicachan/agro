@@ -29,7 +29,9 @@ export async function authenticate(_: AuthState, formData: FormData): Promise<Au
   const { email, password, mode, next } = parsed.data;
   const supabase = await createClient();
   const h = await headers();
-  const origin = h.get("origin") ?? `https://${h.get("host")}`;
+  // Email links must point to an origin allowed in Supabase Auth (Redirect URLs).
+  // AUTH_REDIRECT_ORIGIN lets a new domain reuse an allowed one that redirects to it.
+  const origin = process.env.AUTH_REDIRECT_ORIGIN?.replace(/\/$/, "") || h.get("origin") || `https://${h.get("host")}`;
 
   if (mode === "magic") {
     const { error } = await supabase.auth.signInWithOtp({
